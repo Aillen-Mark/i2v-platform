@@ -1,0 +1,133 @@
+# 图生视频创作平台 · 本地基础设施编排
+# 说明：
+#   1. 所有端口只绑定 127.0.0.1（严禁 localhost，避免 Windows IPv6 ::1 解析问题）。
+#   2. 端口从 .env 读取：3306/6379 已被本机原生 MySQL/Redis 服务占用，顺延为 13306/16379。
+#   3. 数据卷由 Docker 数据根目录承载（已迁移到 E:\Docker\wsl），不写入 C 盘。
+
+name: i2v-platform
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: i2v-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+00:00
+      - --max_connections=500
+      - --explicit_defaults_for_timestamp=ON
+      # 考试提交是「每请求一次 commit」的高并发小事务：trx_commit=2 把 redo fsync 合并到每秒一次，
+      # 显著降低 100 并发提交的 P95；代价是极端断电可能丢失最近 1 秒内已提交的事务。
+      - --innodb-flush-log-at-trx-commit=2
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${MYSQL_PORT}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docs/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+    networks:
+      - i2v
+
+  redis:
+    image: redis:7-alpine
+    container_name: i2v-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    environment:
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${REDIS_PORT}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    networks:
+      - i2v
+
+  minio-init:
+    # 一次性初始化：把命名卷 /data 的属主改成镜像内的 minio 用户，否则容器以非 root 启动会
+    # 报 "unable to create (/data/.minio.sys/tmp) file access denied" 并崩溃重启。
+    image: alpine/minio:RELEASE.2025-10-15T17-29-55Z
+    container_name: i2v-minio-init
+    restart: "no"
+    user: "0:0"
+    entrypoint: ["sh", "-c", "mkdir -p /data && chown -R minio:minio /data && echo minio-data-ready"]
+    volumes:
+      - minio-data:/data
+    networks:
+      - i2v
+
+  minio:
+    # 官方 minio/minio 镜像已从 Docker Hub 下架（hub 返回 object not found，quay/registry.min.io 需鉴权），
+    # 改用社区重建的同源镜像 alpine/minio（固定 RELEASE 版本，entrypoint/cmd 与官方一致）。
+    image: alpine/minio:RELEASE.2025-10-15T17-29-55Z
+    container_name: i2v-minio
+    restart: unless-stopped
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      # 镜像内只有 busybox wget（无 mc / curl），用 MinIO 官方健康端点探活
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks:
+      - i2v
+
+  nginx:
+    # 生产网关：托管 frontend/dist 静态站点 + 反向代理 /api、/admin、/healthz 到宿主机后端
+    image: nginx:1.27-alpine
+    container_name: i2v-nginx
+    restart: unless-stopped
+    extra_hosts:
+      # Linux/Windows Docker Desktop 都能解析到宿主机
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks:
+      - i2v
+
+volumes:
+  mysql-data:
+  redis-data:
+  minio-data:
+networks:
+  i2v:
+    driver: bridge

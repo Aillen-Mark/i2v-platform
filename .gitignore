@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 环境与密钥
+.env
+!.env.example
+
+# 前端
+node_modules/
+dist/
+.vite/
+
+# 运行时产物
+logs/
+*.log
+tmp/
+.DS_Store
+Thumbs.db

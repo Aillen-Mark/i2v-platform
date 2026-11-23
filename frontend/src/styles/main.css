@@ -1,0 +1,101 @@
+/* 全局样式：考试级简洁风格（低饱和、强对比、无花哨动画） */
+:root {
+  --i2v-bg: #f5f7fa;
+  --i2v-panel: #ffffff;
+  --i2v-border: #e4e7ed;
+  --i2v-text: #1f2d3d;
+  --i2v-text-sub: #606266;
+  --i2v-primary: #2563eb;
+  --i2v-success: #16a34a;
+  --i2v-warning: #d97706;
+  --i2v-danger: #dc2626;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+  background: var(--i2v-bg);
+  color: var(--i2v-text);
+  font-size: 14px;
+}
+
+a {
+  color: var(--i2v-primary);
+  text-decoration: none;
+}
+
+.page {
+  padding: 16px 20px 32px;
+}
+
+.panel {
+  background: var(--i2v-panel);
+  border: 1px solid var(--i2v-border);
+  border-radius: 8px;
+}
+
+.panel-title {
+  font-size: 15px;
+  font-weight: 600;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--i2v-border);
+}
+
+.muted {
+  color: var(--i2v-text-sub);
+  font-size: 12px;
+}
+
+.mono {
+  font-family: 'Cascadia Mono', Consolas, monospace;
+}
+
+.flex {
+  display: flex;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+.gap-8 {
+  gap: 8px;
+}
+
+.gap-12 {
+  gap: 12px;
+}
+
+.mt-8 {
+  margin-top: 8px;
+}
+
+.mt-12 {
+  margin-top: 12px;
+}
+
+.mt-16 {
+  margin-top: 16px;
+}
+
+.text-danger {
+  color: var(--i2v-danger);
+}
+
+.text-success {
+  color: var(--i2v-success);
+}
+
+.text-warning {
+  color: var(--i2v-warning);
+}
