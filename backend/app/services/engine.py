@@ -53,15 +53,16 @@ def _from_orm(engine: Engine) -> dict[str, Any]:
     }
 
 
-async def get_default_engine(session: AsyncSession) -> dict[str, Any]:
-    """返回当前默认启用引擎（dict）；Redis 缓存失效时回源数据库并回填。"""
-    try:
-        cached = await redis_client.hgetall(DEFAULT_ENGINE_KEY)
-        parsed = _from_cache(cached)
-        if parsed:
-            return parsed
-    except Exception:  # noqa: BLE001 - Redis 抖动不应阻断提交，回源数据库即可
-        logger.warning("读取默认引擎缓存失败，回源数据库", exc_info=True)
+async def get_default_engine(session: AsyncSession, *, use_cache: bool = True) -> dict[str, Any]:
+    """返回默认启用引擎；提交事务可以直接读取数据库。"""
+    if use_cache:
+        try:
+            cached = await redis_client.hgetall(DEFAULT_ENGINE_KEY)
+            parsed = _from_cache(cached)
+            if parsed:
+                return parsed
+        except Exception:  # noqa: BLE001 - Redis 缓存失效时查询数据库
+            logger.warning("读取默认引擎缓存失败，回源数据库", exc_info=True)
 
     engine = (
         await session.execute(
@@ -81,6 +82,8 @@ async def get_default_engine(session: AsyncSession) -> dict[str, Any]:
         return dict(_FALLBACK)
 
     payload = _from_orm(engine)
+    if not use_cache:
+        return payload
     try:
         await redis_client.hset(
             DEFAULT_ENGINE_KEY,

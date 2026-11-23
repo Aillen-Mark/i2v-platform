@@ -30,7 +30,7 @@ from app.core.errors import register_exception_handlers
 from app.core.redis import check_redis, close_redis
 from app.core.security import hash_password
 from app.core.storage import ensure_buckets
-from app.models import Admin
+from app.models import Admin, GenerationOutbox
 from app.services.hashing import shutdown_pool as shutdown_hash_pool
 from app.services.hashing import warmup as warmup_hash_pool
 
@@ -108,6 +108,9 @@ async def lifespan(app: FastAPI):
             "MySQL 连接失败：请确认 Docker Desktop 已启动、"
             f"docker compose ps 中 mysql 为 healthy，且 .env 端口为 {settings.MYSQL_PORT}"
         )
+    if not settings.MOCK_WORKER:
+        async with AsyncSessionLocal() as session:
+            await session.execute(select(GenerationOutbox.work_id).limit(1))
     if not await _wait_service(check_redis, "Redis"):
         raise RuntimeError(
             "Redis 连接失败：请确认 Docker Desktop 已启动、"

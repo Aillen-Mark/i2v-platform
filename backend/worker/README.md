@@ -32,6 +32,20 @@ python -m celery -A worker.tasks:celery_app beat --schedule=/tmp/i2v-worker-beat
 
 Worker 在 600 秒后结束生成等待。上游仍在排队时尝试取消，上游已经在运行时按 MiniMax 接口限制走本地失败退额。上游任务创建响应丢失时直接退额，避免重发已可能计费的请求。失败回调使用现有 MySQL 事务的幂等退额规则。
 
+## 持久派发
+
+真实生成以 MySQL Outbox 派发。升级已有数据库时先执行 `docs/migrations/001_generation_outbox.sql`。新库由 `docs/schema.sql` 初始化。部署时先暂停提交和旧消费者，完成迁移，再启用新消费者、Dispatcher 与新的 API。保留并盘点原队列和活动作品，迁移不会回填或重投旧记录。
+
+从 `backend/` 启动一份或多份独立 Dispatcher，与 FastAPI、Worker 配置相同的 MySQL/Redis。
+
+```bash
+python -m worker.outbox_dispatcher
+```
+
+真实提交返回 `queued` 表示 MySQL 已持久接收。Dispatcher 对失败发布退避，对已发布但未被 Worker 领取的事件补派。MySQL 记录收件后进入 Worker 执行边界，接管与上游未知请求对账分别由 007、002 完善。Redis 仍用于用户会话与排队显示，Redis 故障时浏览器可能暂时无法通过认证。
+
+回滚前暂停提交，盘点 `generation_outbox` 中 `received_at IS NULL` 和已领取但未完成的 Work；在旧版 API 恢复直派发前先处理这些事件。保留新增表和历史记录。
+
 ## 测试
 
 从 `backend/` 目录运行 `python -m pytest worker/test_worker.py -q`。测试不消耗 API 配额。真实出片验收需使用已开通 H3 V2 的账号和有效余额。

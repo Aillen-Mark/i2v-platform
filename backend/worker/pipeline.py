@@ -137,9 +137,9 @@ def timeout_or_recover(
     refund(job, GenerationError("UPSTREAM_TIMEOUT"))
 
 
-def generate(job: Job, duration: int, ratio: str) -> None:
+def generate(job: Job, duration: int, ratio: str, *, expire_queued: bool = True) -> None:
     work = job.work
-    if queue_expired(job):
+    if expire_queued and queue_expired(job):
         refund(job, GenerationError("UPSTREAM_TIMEOUT"))
         return
     start = generation_start(work.id)

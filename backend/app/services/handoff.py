@@ -18,6 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
+from redis.exceptions import RedisError
 from sqlalchemy import func, select, update
 
 from app.core.config import get_settings
@@ -159,6 +160,13 @@ async def _mark_running(work_id: int) -> str | None:
             return work.task_no
 
 
+async def _remove_from_wait_queue(work_id: int) -> None:
+    try:
+        await redis_client.zrem(QUEUE_KEY, str(work_id))
+    except RedisError:
+        logger.warning("清理作品排队标记失败 work_id=%s", work_id)
+
+
 async def mark_work_succeeded(
     work_id: int,
     video_key: str,
@@ -168,7 +176,6 @@ async def mark_work_succeeded(
     upstream_task_id: str,
 ) -> None:
     """契约 B：成功回调。仅当状态为 queued/running 时更新，重复调用无副作用。"""
-    await redis_client.zrem(QUEUE_KEY, str(work_id))
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -192,6 +199,7 @@ async def mark_work_succeeded(
             work.error_code = None
             work.error_msg = None
 
+    await _remove_from_wait_queue(work_id)
     logger.info("作品 %s 生成成功：%s", work_id, video_key)
 
 
@@ -202,7 +210,6 @@ async def mark_work_failed_and_refund(
     retry_count: int = 1,
 ) -> None:
     """契约 C：失败退还。单事务内行锁 + 幂等，重复调用只退还一次。"""
-    await redis_client.zrem(QUEUE_KEY, str(work_id))
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -212,9 +219,9 @@ async def mark_work_failed_and_refund(
             if work is None:
                 logger.warning("失败回调：作品 %s 不存在，忽略", work_id)
                 return
-            if work.quota_refunded == 1 or work.task_status == "succeeded":
+            if work.quota_refunded == 1 or work.task_status not in ("queued", "running"):
                 logger.info(
-                    "失败回调：作品 %s 已退还或已成功（status=%s refunded=%s），幂等忽略",
+                    "失败回调：作品 %s 已退还或状态不允许退还（status=%s refunded=%s），幂等忽略",
                     work_id,
                     work.task_status,
                     work.quota_refunded,
@@ -272,6 +279,7 @@ async def mark_work_failed_and_refund(
                 )
             )
 
+    await _remove_from_wait_queue(work_id)
     logger.info("作品 %s 失败并已退还配额：%s %s", work_id, error_code, readable_error_msg)
 
 

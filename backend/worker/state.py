@@ -11,7 +11,7 @@ from sqlalchemy import or_, select, update
 
 from app.core.database import SyncSessionLocal
 from app.core.timeutil import utcnow
-from app.models import Candidate, Engine, Work
+from app.models import Candidate, Engine, GenerationOutbox, Work
 from app.services.handoff_sync import sync_redis
 
 TASK_SECONDS = 600
@@ -116,10 +116,12 @@ def stale_work_ids() -> list[int]:
         return list(
             session.scalars(
                 select(Work.id)
+                .outerjoin(GenerationOutbox, GenerationOutbox.work_id == Work.id)
                 .where(
                     or_(
                         (Work.task_status == "queued")
-                        & (Work.submitted_at < now - timedelta(seconds=QUEUE_SECONDS)),
+                        & (Work.submitted_at < now - timedelta(seconds=QUEUE_SECONDS))
+                        & or_(GenerationOutbox.work_id.is_(None), GenerationOutbox.received_at.is_not(None)),
                         (Work.task_status == "running")
                         & (Work.updated_at < now - timedelta(seconds=LEASE_SECONDS)),
                     )

@@ -20,6 +20,7 @@ from importlib import import_module
 from typing import Any
 
 import redis as sync_redis_module
+from redis.exceptions import RedisError
 from sqlalchemy import func, select, update
 
 from app.core.config import get_settings
@@ -157,6 +158,13 @@ def _mark_running(work_id: int) -> None:
                 work.upstream_task_id = f"mock-{uuid.uuid4().hex[:24]}"
 
 
+def _remove_from_wait_queue(work_id: int) -> None:
+    try:
+        sync_redis.zrem(QUEUE_KEY, str(work_id))
+    except RedisError:
+        logger.warning("清理作品排队标记失败 work_id=%s", work_id)
+
+
 def mark_work_succeeded(
     work_id: int,
     video_key: str,
@@ -166,7 +174,6 @@ def mark_work_succeeded(
     upstream_task_id: str,
 ) -> None:
     """契约 B：成功回调（幂等，仅 queued/running 可转 succeeded）。"""
-    sync_redis.zrem(QUEUE_KEY, str(work_id))
 
     with SyncSessionLocal() as session:
         with session.begin():
@@ -188,6 +195,7 @@ def mark_work_succeeded(
             work.error_code = None
             work.error_msg = None
 
+    _remove_from_wait_queue(work_id)
     logger.info("作品 %s 生成成功（sync）：%s", work_id, video_key)
 
 
@@ -198,7 +206,6 @@ def mark_work_failed_and_refund(
     retry_count: int = 1,
 ) -> None:
     """契约 C：失败退还（幂等，重复调用只退一次）。"""
-    sync_redis.zrem(QUEUE_KEY, str(work_id))
 
     with SyncSessionLocal() as session:
         with session.begin():
@@ -206,9 +213,9 @@ def mark_work_failed_and_refund(
             if work is None:
                 logger.warning("失败回调：作品 %s 不存在，忽略", work_id)
                 return
-            if work.quota_refunded == 1 or work.task_status == "succeeded":
+            if work.quota_refunded == 1 or work.task_status not in ("queued", "running"):
                 logger.info(
-                    "失败回调：作品 %s 已退还或已成功（status=%s refunded=%s），幂等忽略",
+                    "失败回调：作品 %s 已退还或状态不允许退还（status=%s refunded=%s），幂等忽略",
                     work_id,
                     work.task_status,
                     work.quota_refunded,
@@ -258,6 +265,7 @@ def mark_work_failed_and_refund(
                 )
             )
 
+    _remove_from_wait_queue(work_id)
     logger.info("作品 %s 失败并已退还配额（sync）：%s %s", work_id, error_code, readable_error_msg)
 
 

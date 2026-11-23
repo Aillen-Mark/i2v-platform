@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings, is_https_endpoint
 from app.core.database import sync_engine
+from app.services.generation_outbox import receive_delivery
 from worker.config import worker_settings
 from worker.pipeline import generate, queue_expired
 from worker.state import (
@@ -32,7 +33,8 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
     task_soft_time_limit=TASK_SECONDS,
     task_time_limit=TASK_SECONDS + 45,
-    broker_transport_options={"visibility_timeout": 3600},
+    broker_connection_timeout=5,
+    broker_transport_options={"visibility_timeout": 3600, "socket_connect_timeout": 5, "socket_timeout": 5},
     beat_schedule={
         "reconcile-video-works": {"task": "i2v.reconcile_stale", "schedule": 60.0},
     },
@@ -62,11 +64,12 @@ def reset_database_pool(**_kwargs) -> None:
 def enqueue_video_generation(
     self,
     work_id: int,
-    image_url: str,
-    prompt: str,
-    engine_code: str,
+    image_url: str = "",
+    prompt: str = "",
+    engine_code: str = "",
     duration: int = 15,
     aspect_ratio: str = "16:9",
+    from_outbox: bool = False,
 ) -> None:
     # Accept the gateway's kwargs verbatim. Fetch the original image, prompt, and engine from
     # committed state so broker redelivery still works after a presigned URL expires.
@@ -79,13 +82,16 @@ def enqueue_video_generation(
             if job is None:
                 return
             code = job.work.engine_code or engine_code
-            if not job.work.upstream_task_id and not queue_expired(job) and circuit_is_open(code):
+            expired = not from_outbox and queue_expired(job)
+            if not job.work.upstream_task_id and not expired and circuit_is_open(code):
                 raise self.retry(countdown=20 + uniform(0, 10))
             limit = max(1, job.engine.max_concurrency) if job.engine is not None else 1
             with generation_slot(code, limit, worker_settings().I2V_ACCOUNT_CONCURRENCY) as acquired:
                 if not acquired:
                     raise self.retry(countdown=3 + uniform(0, 3))
-                generate(job, duration, job.work.aspect_ratio or aspect_ratio)
+                if from_outbox and not receive_delivery(work_id) and not job.work.upstream_task_id:
+                    return
+                generate(job, duration, job.work.aspect_ratio or aspect_ratio, expire_queued=not from_outbox)
         finally:
             lock.release()
     except (RedisError, SQLAlchemyError):

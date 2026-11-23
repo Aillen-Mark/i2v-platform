@@ -21,7 +21,8 @@ from app.core.redis import redis_client
 from app.core.security import utcnow
 from app.core.storage import presigned_get_url, upload_bytes
 from app.core.timeutil import to_iso_utc
-from app.models import Candidate, Question, Quota, Work
+from app.models import Candidate, GenerationOutbox, Question, Quota, Work
+from app.services.audit import write_audit
 from app.services.engine import get_default_engine
 from app.services.handoff import QUEUE_KEY, mark_work_failed_and_refund, trigger_video_generation
 from app.services.moderation import moderate_image
@@ -195,9 +196,9 @@ async def submit_work(session: AsyncSession, candidate: Candidate, work_id: int)
     if work.task_status != "draft":
         # 已提交过：幂等返回当前状态，绝不再扣一次配额
         remaining = await _quota_remaining(session, candidate_id, question_id)
-        ahead = await queue_ahead(work.id) if work.task_status == "queued" else 0
-        engine = await get_default_engine(session)
-        avg_cost = await average_cost_seconds()
+        ahead = await queue_ahead(work.id) if settings.MOCK_WORKER and work.task_status == "queued" else 0
+        engine = await get_default_engine(session, use_cache=settings.MOCK_WORKER)
+        avg_cost = await average_cost_seconds() if settings.MOCK_WORKER else DEFAULT_AVG_COST_SEC
         logger.info("作品 %s 重复提交，按幂等处理（status=%s）", work.id, work.task_status)
         return {
             "work": work,
@@ -262,7 +263,7 @@ async def submit_work(session: AsyncSession, candidate: Candidate, work_id: int)
     ).one_or_none()
     quota_used = int(quota_row[0]) if quota_row else 0
     quota_total = int(quota_row[1]) if quota_row else 0
-    engine = await get_default_engine(session)
+    engine = await get_default_engine(session, use_cache=settings.MOCK_WORKER)
 
     work.seq = int(quota_used or 0)
     work.task_status = "queued"
@@ -271,36 +272,32 @@ async def submit_work(session: AsyncSession, candidate: Candidate, work_id: int)
     work.submitted_at = utcnow()
     work.error_code = None
     work.error_msg = None
+    await write_audit(
+        session,
+        admin_id=0,
+        admin_username="SYSTEM_GATEWAY",
+        action="debit_quota",
+        target_type="work",
+        target_id=work.task_no,
+        before={"quota_used": quota_used - 1},
+        after={"quota_used": quota_used, "quota_total": quota_total},
+    )
+    if not settings.MOCK_WORKER:
+        session.add(
+            GenerationOutbox(
+                work_id=work.id, created_at=work.submitted_at, dispatch_after=work.submitted_at,
+            )
+        )
     await session.commit()
 
-    # ---------- 事务提交之后才入队；入队失败立即退还，绝不吞次数 ----------
-    try:
-        image_url = await asyncio.to_thread(
-            presigned_get_url, settings.MINIO_BUCKET_PUBLIC, work.image_key, IMAGE_URL_TTL
-        )
-        await trigger_video_generation(
-            work_id=work.id,
-            image_public_url=image_url,
-            prompt=work.prompt,
-            engine_code=engine["code"],
-            aspect_ratio=work.aspect_ratio or "16:9",
-        )
-    except Exception:  # noqa: BLE001 - 入队异常必须回滚配额
-        logger.exception("作品 %s 入队失败，立即退还配额", work.id)
-        await mark_work_failed_and_refund(
-            work_id=work.id,
-            error_code="ENQUEUE_FAILED",
-            readable_error_msg="任务入队失败，本次机会已退还，请重试",
-            retry_count=0,
-        )
-        raise AppError(
-            "ENQUEUE_FAILED",
-            "任务入队失败，本次机会已退还，请稍后重试",
-            status_code=503,
-        ) from None
+    if settings.MOCK_WORKER:
+        await _dispatch_mock(work)
 
-    ahead = await queue_ahead(work.id)
-    avg_cost = await average_cost_seconds()
+    ahead = 0
+    avg_cost = DEFAULT_AVG_COST_SEC
+    if settings.MOCK_WORKER:
+        ahead = await queue_ahead(work.id)
+        avg_cost = await average_cost_seconds()
     remaining = max(quota_total - quota_used, 0)
     logger.info(
         "考生 %s 提交作品 %s（题目 %s，seq=%s，engine=%s，剩余 %s 次）",
@@ -318,3 +315,32 @@ async def submit_work(session: AsyncSession, candidate: Candidate, work_id: int)
         "queue_ahead": ahead,
         "estimated_wait_sec": estimate_wait_seconds(ahead, engine["max_concurrency"], avg_cost),
     }
+
+
+async def _dispatch_mock(work: Work) -> None:
+    """Keep the development-only in-process worker available."""
+    try:
+        image_url = await asyncio.to_thread(
+            presigned_get_url, settings.MINIO_BUCKET_PUBLIC, work.image_key, IMAGE_URL_TTL
+        )
+        await trigger_video_generation(
+            work_id=work.id,
+            image_public_url=image_url,
+            prompt=work.prompt,
+            engine_code=work.engine_code or "",
+            aspect_ratio=work.aspect_ratio or "16:9",
+            duration=work.duration_sec or 15,
+        )
+    except Exception:  # noqa: BLE001 - 入队异常必须回滚配额
+        logger.exception("作品 %s 入队失败，立即退还配额", work.id)
+        await mark_work_failed_and_refund(
+            work_id=work.id,
+            error_code="ENQUEUE_FAILED",
+            readable_error_msg="任务入队失败，本次机会已退还，请重试",
+            retry_count=0,
+        )
+        raise AppError(
+            "ENQUEUE_FAILED",
+            "任务入队失败，本次机会已退还，请稍后重试",
+            status_code=503,
+        ) from None
