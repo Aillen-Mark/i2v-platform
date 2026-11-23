@@ -61,12 +61,11 @@ async def trigger_video_generation(
     """
     await redis_client.zadd(QUEUE_KEY, {str(work_id): time.time()})
     logger.info(
-        "作品 %s 已入队：engine=%s aspect_ratio=%s prompt_len=%s image=%s",
+        "作品 %s 已入队：engine=%s aspect_ratio=%s prompt_len=%s",
         work_id,
         engine_code,
         aspect_ratio,
         len(prompt or ""),
-        image_public_url,
     )
 
     if not settings.MOCK_WORKER:

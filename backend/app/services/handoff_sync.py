@@ -81,12 +81,11 @@ def trigger_video_generation(
     """契约 A：入队。MOCK_WORKER=true 时用后台线程跑一次完整 Mock 流程。"""
     sync_redis.zadd(QUEUE_KEY, {str(work_id): time.time()})
     logger.info(
-        "作品 %s 已入队（sync）：engine=%s aspect_ratio=%s prompt_len=%s image=%s",
+        "作品 %s 已入队（sync）：engine=%s aspect_ratio=%s prompt_len=%s",
         work_id,
         engine_code,
         aspect_ratio,
         len(prompt or ""),
-        image_url,
     )
 
     if not settings.MOCK_WORKER:
@@ -120,7 +119,7 @@ def _run_mock_worker(work_id: int, mock_force_outcome: str | None) -> None:
         cost_seconds = max(1, int(round(time.monotonic() - started)))
 
         if outcome == MOCK_OUTCOME_SUCCEED:
-            from app.services.handoff import MOCK_SAMPLE_PATH, _upload_mock_video
+            from app.services.handoff import _upload_mock_video
 
             video_key = f"videos/mock/{work_id}.mp4"
             uploaded = _upload_mock_video(video_key)

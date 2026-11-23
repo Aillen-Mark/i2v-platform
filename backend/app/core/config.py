@@ -2,7 +2,7 @@
 
 约定：
 - 所有连接地址使用 127.0.0.1，禁止 localhost。
-- AES_FERNET_KEY 为空或非法时，首次加载自动生成 32 字节 url-safe base64 密钥并回写 .env。
+- 开发环境可生成 Fernet 密钥，生产环境必须预置密钥。
 """
 
 from __future__ import annotations
@@ -10,14 +10,33 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 from cryptography.fernet import Fernet
-from pydantic import field_validator
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/core/config.py -> backend/app/core -> backend/app -> backend -> 仓库根
 ROOT_DIR: Path = Path(__file__).resolve().parents[3]
 ENV_FILE: Path = ROOT_DIR / ".env"
+DEFAULT_ADMIN_PASSWORD = "Admin@2026!"
+
+
+def is_https_endpoint(value: str) -> bool:
+    if not value or any(character.isspace() for character in value):
+        return False
+    try:
+        url = urlsplit(value)
+        port = url.port
+    except ValueError:
+        return False
+    return (
+        url.scheme == "https"
+        and bool(url.hostname)
+        and url.username is None
+        and not url.fragment
+        and (port is None or port > 0)
+    )
 
 
 def _is_valid_fernet_key(value: str) -> bool:
@@ -27,7 +46,7 @@ def _is_valid_fernet_key(value: str) -> bool:
     try:
         Fernet(value.encode("utf-8"))
         return True
-    except (ValueError, TypeError, Exception):  # noqa: BLE001 - 非法密钥统一视为无效
+    except (ValueError, TypeError):
         return False
 
 
@@ -127,7 +146,7 @@ class Settings(BaseSettings):
 
     # 初始管理员
     ADMIN_INIT_USERNAME: str = "admin"
-    INIT_ADMIN_PASSWORD: str = "Admin@2026!"
+    INIT_ADMIN_PASSWORD: str = ""
     ADMIN_INIT_PASSWORD: str = ""
 
     # Excel 导入
@@ -147,31 +166,56 @@ class Settings(BaseSettings):
     MODERATION_ENDPOINT: str = ""
     MODERATION_TIMEOUT: float = 10.0
 
-    @field_validator("AES_FERNET_KEY")
-    @classmethod
-    def _validate_fernet_key(cls, value: str) -> str:
-        if value and not _is_valid_fernet_key(value):
-            raise ValueError("AES_FERNET_KEY 必须是 32 字节 url-safe base64 的 Fernet 密钥")
-        return value
+    @property
+    def is_production(self) -> bool:
+        return self.APP_ENV.strip().lower() in {"prod", "production"}
+
+    def validate_production(self) -> None:
+        invalid: set[str] = set()
+        if self.DEBUG:
+            invalid.add("DEBUG")
+        if self.SQL_ECHO:
+            invalid.add("SQL_ECHO")
+        if self.MOCK_WORKER:
+            invalid.add("MOCK_WORKER")
+        if self.MODERATION_PROVIDER.strip().lower() != "http":
+            invalid.add("MODERATION_PROVIDER")
+        if not is_https_endpoint(self.MODERATION_ENDPOINT):
+            invalid.add("MODERATION_ENDPOINT")
+        if not _is_valid_fernet_key(self.AES_FERNET_KEY):
+            invalid.add("AES_FERNET_KEY")
+
+        credentials = {
+            "MYSQL_PASSWORD": (self.MYSQL_PASSWORD, {"i2v_pwd_2026", "root_pwd_2026"}),
+            "REDIS_PASSWORD": (self.REDIS_PASSWORD, set()),
+            "MINIO_ACCESS_KEY": (self.MINIO_ACCESS_KEY, {"minioadmin"}),
+            "MINIO_SECRET_KEY": (self.MINIO_SECRET_KEY, {"minioadmin", "minioadmin123"}),
+            "INIT_ADMIN_PASSWORD/ADMIN_INIT_PASSWORD": (self.admin_password, {DEFAULT_ADMIN_PASSWORD}),
+        }
+        for name, (value, defaults) in credentials.items():
+            if not value.strip() or value.strip() in defaults:
+                invalid.add(name)
+        if invalid:
+            raise RuntimeError("生产配置不安全或缺失，请检查：" + ", ".join(sorted(invalid)))
 
     # ---- 派生连接串 ----
     @property
     def database_url(self) -> str:
         return (
-            f"mysql+aiomysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
+            f"mysql+aiomysql://{quote(self.MYSQL_USER, safe='')}:{quote(self.MYSQL_PASSWORD, safe='')}"
             f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}?charset=utf8mb4"
         )
 
     @property
     def sync_database_url(self) -> str:
         return (
-            f"mysql+pymysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
+            f"mysql+pymysql://{quote(self.MYSQL_USER, safe='')}:{quote(self.MYSQL_PASSWORD, safe='')}"
             f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}?charset=utf8mb4"
         )
 
     @property
     def redis_url(self) -> str:
-        auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        auth = f":{quote(self.REDIS_PASSWORD, safe='')}@" if self.REDIS_PASSWORD else ""
         return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
     @property
@@ -182,10 +226,18 @@ class Settings(BaseSettings):
     @property
     def admin_password(self) -> str:
         """兼容 decisions.md 的 ADMIN_INIT_PASSWORD 与手册的 INIT_ADMIN_PASSWORD 两种命名。"""
-        return self.INIT_ADMIN_PASSWORD or self.ADMIN_INIT_PASSWORD or "Admin@2026!"
+        return self.INIT_ADMIN_PASSWORD or self.ADMIN_INIT_PASSWORD or DEFAULT_ADMIN_PASSWORD
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    ensure_fernet_key()
-    return Settings()
+    try:
+        settings = Settings()
+    except ValidationError as exc:
+        fields = {str(error["loc"][0]) for error in exc.errors(include_input=False) if error["loc"]}
+        raise RuntimeError("配置格式无效，请检查：" + ", ".join(sorted(fields))) from None
+    if settings.is_production:
+        settings.validate_production()
+    elif not _is_valid_fernet_key(settings.AES_FERNET_KEY):
+        settings.AES_FERNET_KEY = ensure_fernet_key()
+    return settings

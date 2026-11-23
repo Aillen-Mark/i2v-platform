@@ -41,6 +41,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
 logger = logging.getLogger("app.main")
+if settings.is_production:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def _wait_service(

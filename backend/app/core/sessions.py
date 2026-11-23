@@ -138,9 +138,15 @@ def set_session_cookie(response: Response, role: Role, sid: str) -> None:
         httponly=True,
         samesite="lax",
         path="/",
-        secure=False,  # 本地 HTTP；上 HTTPS 后由部署层置 True
+        secure=get_settings().is_production,
     )
 
 
 def clear_session_cookie(response: Response, role: Role) -> None:
-    response.delete_cookie(key=COOKIE_NAME[role], path="/", httponly=True, samesite="lax")
+    response.delete_cookie(
+        key=COOKIE_NAME[role],
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=get_settings().is_production,
+    )

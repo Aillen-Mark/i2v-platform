@@ -8,7 +8,7 @@ from celery import Celery, signals
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.core.config import get_settings
+from app.core.config import get_settings, is_https_endpoint
 from app.core.database import sync_engine
 from worker.config import worker_settings
 from worker.pipeline import generate, queue_expired
@@ -46,6 +46,8 @@ def validate_worker(**_kwargs) -> None:
     options = worker_settings()
     if not options.MINIMAX_API_KEY.get_secret_value().strip():
         raise SystemExit("Set MINIMAX_API_KEY before starting the i2v worker.")
+    if get_settings().is_production and not is_https_endpoint(options.MINIMAX_BASE_URL):
+        raise SystemExit("Set MINIMAX_BASE_URL to an HTTPS endpoint in production.")
     if not which(options.I2V_FFMPEG):
         raise SystemExit("Install ffmpeg or set I2V_FFMPEG to its executable.")
     logging.getLogger("httpx").setLevel(logging.WARNING)
