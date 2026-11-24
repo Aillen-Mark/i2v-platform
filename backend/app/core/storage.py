@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import BinaryIO
 from urllib.parse import quote, urlparse, urlunparse
 
 import boto3
@@ -131,6 +132,12 @@ def upload_bytes(bucket: str, key: str, data: bytes, content_type: str = "applic
     client = _client()
     client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
     return key
+
+
+def upload_file(
+    bucket: str, key: str, stream: BinaryIO, size: int, content_type: str = "application/octet-stream"
+) -> None:
+    _client().put_object(Bucket=bucket, Key=key, Body=stream, ContentLength=size, ContentType=content_type)
 
 
 def object_exists(bucket: str, key: str) -> bool:

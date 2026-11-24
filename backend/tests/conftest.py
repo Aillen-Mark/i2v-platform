@@ -39,6 +39,9 @@ TEST_DATABASE = os.environ["MYSQL_DATABASE"]
 
 # 会被用例改写的表；admins（默认管理员）与 engines（预置引擎）保持不动
 MUTABLE_TABLES: tuple[str, ...] = (
+    "generation_executions",
+    "generation_attempts",
+    "generation_outbox",
     "works",
     "quotas",
     "candidates",

@@ -20,12 +20,14 @@ from importlib import import_module
 from typing import Any
 
 import redis as sync_redis_module
+from redis.exceptions import RedisError
 from sqlalchemy import func, select, update
 
 from app.core.config import get_settings
 from app.core.database import SyncSessionLocal
 from app.core.timeutil import utcnow
-from app.models import AuditLog, Quota, Work
+from app.models import AuditLog, GenerationAttempt, Quota, Work
+from app.services.execution_lease import ExecutionLease, ExecutionStopped, check_lease
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +83,11 @@ def trigger_video_generation(
     """契约 A：入队。MOCK_WORKER=true 时用后台线程跑一次完整 Mock 流程。"""
     sync_redis.zadd(QUEUE_KEY, {str(work_id): time.time()})
     logger.info(
-        "作品 %s 已入队（sync）：engine=%s aspect_ratio=%s prompt_len=%s image=%s",
+        "作品 %s 已入队（sync）：engine=%s aspect_ratio=%s prompt_len=%s",
         work_id,
         engine_code,
         aspect_ratio,
         len(prompt or ""),
-        image_url,
     )
 
     if not settings.MOCK_WORKER:
@@ -120,7 +121,7 @@ def _run_mock_worker(work_id: int, mock_force_outcome: str | None) -> None:
         cost_seconds = max(1, int(round(time.monotonic() - started)))
 
         if outcome == MOCK_OUTCOME_SUCCEED:
-            from app.services.handoff import MOCK_SAMPLE_PATH, _upload_mock_video
+            from app.services.handoff import _upload_mock_video
 
             video_key = f"videos/mock/{work_id}.mp4"
             uploaded = _upload_mock_video(video_key)
@@ -158,6 +159,23 @@ def _mark_running(work_id: int) -> None:
                 work.upstream_task_id = f"mock-{uuid.uuid4().hex[:24]}"
 
 
+def _remove_from_wait_queue(work_id: int) -> None:
+    try:
+        sync_redis.zrem(QUEUE_KEY, str(work_id))
+    except RedisError:
+        logger.warning("清理作品排队标记失败 work_id=%s", work_id)
+
+
+def _current_attempt(session, work_id: int) -> GenerationAttempt | None:
+    return session.scalar(
+        select(GenerationAttempt)
+        .where(GenerationAttempt.work_id == work_id)
+        .order_by(GenerationAttempt.attempt_no.desc())
+        .limit(1)
+        .with_for_update()
+    )
+
+
 def mark_work_succeeded(
     work_id: int,
     video_key: str,
@@ -165,9 +183,10 @@ def mark_work_succeeded(
     duration_sec: int,
     cost_seconds: int,
     upstream_task_id: str,
+    *,
+    lease: ExecutionLease | None = None,
 ) -> None:
     """契约 B：成功回调（幂等，仅 queued/running 可转 succeeded）。"""
-    sync_redis.zrem(QUEUE_KEY, str(work_id))
 
     with SyncSessionLocal() as session:
         with session.begin():
@@ -179,6 +198,22 @@ def mark_work_succeeded(
                 logger.info("成功回调：作品 %s 当前状态 %s，幂等忽略", work_id, work.task_status)
                 return
 
+            execution = check_lease(session, work, lease)
+            if execution is not None:
+                attempt = _current_attempt(session, work_id)
+                if (
+                    attempt is None
+                    or attempt.status != "uploading"
+                    or attempt.provider_task_id != upstream_task_id
+                    or execution.artifact_key != video_key
+                    or execution.artifact_size != file_size
+                ):
+                    raise ExecutionStopped(work_id)
+                attempt.status = "succeeded"
+                attempt.error_code = None
+                attempt.updated_at = utcnow()
+                execution.lease_owner = None
+                execution.lease_expires_at = None
             work.task_status = "succeeded"
             work.video_key = video_key
             work.file_size = file_size
@@ -189,6 +224,7 @@ def mark_work_succeeded(
             work.error_code = None
             work.error_msg = None
 
+    _remove_from_wait_queue(work_id)
     logger.info("作品 %s 生成成功（sync）：%s", work_id, video_key)
 
 
@@ -197,9 +233,10 @@ def mark_work_failed_and_refund(
     error_code: str,
     readable_error_msg: str,
     retry_count: int = 1,
+    *,
+    lease: ExecutionLease | None = None,
 ) -> None:
     """契约 C：失败退还（幂等，重复调用只退一次）。"""
-    sync_redis.zrem(QUEUE_KEY, str(work_id))
 
     with SyncSessionLocal() as session:
         with session.begin():
@@ -207,15 +244,25 @@ def mark_work_failed_and_refund(
             if work is None:
                 logger.warning("失败回调：作品 %s 不存在，忽略", work_id)
                 return
-            if work.quota_refunded == 1 or work.task_status == "succeeded":
+            if work.quota_refunded == 1 or work.task_status not in ("queued", "running"):
                 logger.info(
-                    "失败回调：作品 %s 已退还或已成功（status=%s refunded=%s），幂等忽略",
+                    "失败回调：作品 %s 已退还或状态不允许退还（status=%s refunded=%s），幂等忽略",
                     work_id,
                     work.task_status,
                     work.quota_refunded,
                 )
                 return
 
+            execution = check_lease(session, work, lease)
+            attempt = _current_attempt(session, work_id)
+            if (attempt is not None and attempt.status not in ("failed", "cancelled")) or (
+                execution is not None and attempt is None
+            ):
+                logger.warning("Refund withheld for unsettled upstream work_id=%s", work_id)
+                return
+            if execution is not None:
+                execution.lease_owner = None
+                execution.lease_expires_at = None
             before_val: dict[str, Any] = {
                 "task_status": work.task_status,
                 "quota_refunded": work.quota_refunded,
@@ -259,6 +306,7 @@ def mark_work_failed_and_refund(
                 )
             )
 
+    _remove_from_wait_queue(work_id)
     logger.info("作品 %s 失败并已退还配额（sync）：%s %s", work_id, error_code, readable_error_msg)
 
 

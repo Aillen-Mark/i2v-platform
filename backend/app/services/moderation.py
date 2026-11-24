@@ -42,16 +42,27 @@ async def _moderate_http(data: bytes, filename: str, content_type: str) -> Moder
         "content_type": content_type,
         "data_b64": base64.b64encode(data).decode("ascii"),
     }
-    async with httpx.AsyncClient(timeout=settings.MODERATION_TIMEOUT) as client:
-        response = await client.post(settings.MODERATION_ENDPOINT, json=payload)
-    if response.status_code != 200:
-        logger.error("审核服务返回 %s：%s", response.status_code, response.text[:300])
-        return ModerationResult(passed=False, reason="审核服务不可用，请稍后重试", provider="http")
+    unavailable = ModerationResult(False, "审核服务不可用，请稍后重试", "http")
+    try:
+        async with httpx.AsyncClient(timeout=settings.MODERATION_TIMEOUT) as client:
+            response = await client.post(settings.MODERATION_ENDPOINT, json=payload)
+        response.raise_for_status()
+        body = response.json()
+    except httpx.HTTPStatusError as exc:
+        logger.warning("审核服务返回异常状态：%s", exc.response.status_code)
+        return unavailable
+    except (httpx.RequestError, ValueError):
+        logger.warning("审核服务请求失败或响应不是有效 JSON")
+        return unavailable
 
-    body = response.json()
-    passed = bool(body.get("passed"))
-    reason = body.get("reason")
-    return ModerationResult(passed=passed, reason=None if passed else (reason or "内容未通过审核"), provider="http")
+    if not isinstance(body, dict) or not isinstance(body.get("passed"), bool):
+        logger.warning("审核服务响应缺少布尔类型的 passed 字段")
+        return unavailable
+    if body.get("reason") is not None and not isinstance(body["reason"], str):
+        logger.warning("审核服务响应的 reason 类型不符")
+        return unavailable
+    passed = body["passed"]
+    return ModerationResult(passed, None if passed else "内容未通过审核", "http")
 
 
 async def moderate_image(data: bytes, filename: str, content_type: str) -> ModerationResult:

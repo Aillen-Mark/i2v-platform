@@ -16,12 +16,7 @@ from app.models import Admin, Candidate
 
 
 def client_ip(request: Request) -> str:
-    """取客户端 IP：优先 X-Forwarded-For 首个地址（Nginx 反代场景），否则 socket 对端。"""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first[:45]
+    """由 ASGI 服务器解析可信代理地址，应用使用解析后的客户端。"""
     if request.client and request.client.host:
         return request.client.host[:45]
     return "0.0.0.0"

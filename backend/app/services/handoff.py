@@ -18,13 +18,14 @@ import time
 import uuid
 from pathlib import Path
 
+from redis.exceptions import RedisError
 from sqlalchemy import func, select, update
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
 from app.core.redis import redis_client
 from app.core.security import utcnow
-from app.models import AuditLog, Quota, Work
+from app.models import AuditLog, GenerationAttempt, GenerationExecution, Quota, Work
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +62,11 @@ async def trigger_video_generation(
     """
     await redis_client.zadd(QUEUE_KEY, {str(work_id): time.time()})
     logger.info(
-        "作品 %s 已入队：engine=%s aspect_ratio=%s prompt_len=%s image=%s",
+        "作品 %s 已入队：engine=%s aspect_ratio=%s prompt_len=%s",
         work_id,
         engine_code,
         aspect_ratio,
         len(prompt or ""),
-        image_public_url,
     )
 
     if not settings.MOCK_WORKER:
@@ -160,6 +160,13 @@ async def _mark_running(work_id: int) -> str | None:
             return work.task_no
 
 
+async def _remove_from_wait_queue(work_id: int) -> None:
+    try:
+        await redis_client.zrem(QUEUE_KEY, str(work_id))
+    except RedisError:
+        logger.warning("清理作品排队标记失败 work_id=%s", work_id)
+
+
 async def mark_work_succeeded(
     work_id: int,
     video_key: str,
@@ -169,7 +176,6 @@ async def mark_work_succeeded(
     upstream_task_id: str,
 ) -> None:
     """契约 B：成功回调。仅当状态为 queued/running 时更新，重复调用无副作用。"""
-    await redis_client.zrem(QUEUE_KEY, str(work_id))
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -183,6 +189,9 @@ async def mark_work_succeeded(
                 logger.info("成功回调：作品 %s 当前状态 %s，幂等忽略", work_id, work.task_status)
                 return
 
+            if await session.get(GenerationExecution, work_id) is not None:
+                logger.warning("Unfenced success ignored for durable work_id=%s", work_id)
+                return
             work.task_status = "succeeded"
             work.video_key = video_key
             work.file_size = file_size
@@ -193,6 +202,7 @@ async def mark_work_succeeded(
             work.error_code = None
             work.error_msg = None
 
+    await _remove_from_wait_queue(work_id)
     logger.info("作品 %s 生成成功：%s", work_id, video_key)
 
 
@@ -203,7 +213,6 @@ async def mark_work_failed_and_refund(
     retry_count: int = 1,
 ) -> None:
     """契约 C：失败退还。单事务内行锁 + 幂等，重复调用只退还一次。"""
-    await redis_client.zrem(QUEUE_KEY, str(work_id))
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -213,15 +222,20 @@ async def mark_work_failed_and_refund(
             if work is None:
                 logger.warning("失败回调：作品 %s 不存在，忽略", work_id)
                 return
-            if work.quota_refunded == 1 or work.task_status == "succeeded":
+            if work.quota_refunded == 1 or work.task_status not in ("queued", "running"):
                 logger.info(
-                    "失败回调：作品 %s 已退还或已成功（status=%s refunded=%s），幂等忽略",
+                    "失败回调：作品 %s 已退还或状态不允许退还（status=%s refunded=%s），幂等忽略",
                     work_id,
                     work.task_status,
                     work.quota_refunded,
                 )
                 return
 
+            if await session.get(GenerationExecution, work_id) is not None or await session.scalar(
+                select(GenerationAttempt.id).where(GenerationAttempt.work_id == work_id).limit(1)
+            ) is not None:
+                logger.warning("Unfenced refund ignored for durable work_id=%s", work_id)
+                return
             before_val = {
                 "task_status": work.task_status,
                 "quota_refunded": work.quota_refunded,
@@ -273,6 +287,7 @@ async def mark_work_failed_and_refund(
                 )
             )
 
+    await _remove_from_wait_queue(work_id)
     logger.info("作品 %s 失败并已退还配额：%s %s", work_id, error_code, readable_error_msg)
 
 

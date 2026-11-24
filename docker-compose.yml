@@ -17,9 +17,9 @@ services:
       - --default-time-zone=+00:00
       - --max_connections=500
       - --explicit_defaults_for_timestamp=ON
-      # 考试提交是「每请求一次 commit」的高并发小事务：trx_commit=2 把 redo fsync 合并到每秒一次，
-      # 显著降低 100 并发提交的 P95；代价是极端断电可能丢失最近 1 秒内已提交的事务。
-      - --innodb-flush-log-at-trx-commit=2
+      # 提交确认前同步 redo；启用 Binlog 时同步提交记录。
+      - --innodb-flush-log-at-trx-commit=${MYSQL_INNODB_FLUSH_AT_TRX_COMMIT:-1}
+      - --sync-binlog=${MYSQL_SYNC_BINLOG:-1}
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}

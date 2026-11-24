@@ -159,3 +159,58 @@ CREATE TABLE `audit_logs` (
   KEY `idx_admin_time` (`admin_id`, `created_at`),
   KEY `idx_action_time` (`action`, `created_at`)
 ) ENGINE=InnoDB COMMENT='管理员关键操作与配额变动审计表';
+
+-- Run against the selected application database before starting the updated API.
+CREATE TABLE IF NOT EXISTS `generation_outbox` (
+  `work_id` BIGINT UNSIGNED NOT NULL,
+  `created_at` DATETIME(6) NOT NULL,
+  `dispatch_after` DATETIME(6) NOT NULL,
+  `lease_token` CHAR(32) NULL,
+  `leased_until` DATETIME(6) NULL,
+  `attempts` INT NOT NULL DEFAULT 0,
+  `published_at` DATETIME(6) NULL,
+  `received_at` DATETIME(6) NULL,
+  `last_error` VARCHAR(64) NULL,
+  PRIMARY KEY (`work_id`),
+  KEY `idx_outbox_due` (`received_at`, `dispatch_after`, `work_id`),
+  KEY `idx_outbox_created` (`received_at`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `generation_attempts` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `work_id` BIGINT UNSIGNED NOT NULL,
+  `attempt_no` INT NOT NULL,
+  `request_id` CHAR(32) NOT NULL,
+  `provider` VARCHAR(32) NOT NULL,
+  `provider_task_id` VARCHAR(128) NULL,
+  `status` VARCHAR(24) NOT NULL,
+  `retry_create` TINYINT NOT NULL DEFAULT 0,
+  `request_started_at` DATETIME(6) NULL,
+  `response_received_at` DATETIME(6) NULL,
+  `last_checked_at` DATETIME(6) NULL,
+  `next_check_at` DATETIME(6) NULL,
+  `error_code` VARCHAR(64) NULL,
+  `created_at` DATETIME(6) NOT NULL,
+  `updated_at` DATETIME(6) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_attempt_work_no` (`work_id`, `attempt_no`),
+  UNIQUE KEY `uk_attempt_request` (`request_id`),
+  UNIQUE KEY `uk_attempt_provider_task` (`provider`, `provider_task_id`),
+  KEY `idx_attempt_due` (`status`, `next_check_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `generation_executions` (
+  `work_id` BIGINT UNSIGNED NOT NULL,
+  `lease_owner` CHAR(32) NULL,
+  `lease_generation` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  `lease_expires_at` DATETIME(6) NULL,
+  `last_heartbeat_at` DATETIME(6) NULL,
+  `recover_after` DATETIME(6) NOT NULL,
+  `started_at` DATETIME(6) NOT NULL,
+  `legacy_uncertain` TINYINT NOT NULL DEFAULT 0,
+  `artifact_key` VARCHAR(255) NULL,
+  `artifact_size` BIGINT UNSIGNED NULL,
+  `artifact_sha256` CHAR(64) NULL,
+  PRIMARY KEY (`work_id`),
+  KEY `idx_execution_recover` (`recover_after`, `lease_expires_at`, `work_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

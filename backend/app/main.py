@@ -30,7 +30,7 @@ from app.core.errors import register_exception_handlers
 from app.core.redis import check_redis, close_redis
 from app.core.security import hash_password
 from app.core.storage import ensure_buckets
-from app.models import Admin
+from app.models import Admin, GenerationAttempt, GenerationExecution, GenerationOutbox
 from app.services.hashing import shutdown_pool as shutdown_hash_pool
 from app.services.hashing import warmup as warmup_hash_pool
 
@@ -41,6 +41,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
 logger = logging.getLogger("app.main")
+if settings.is_production:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def _wait_service(
@@ -106,6 +108,10 @@ async def lifespan(app: FastAPI):
             "MySQL 连接失败：请确认 Docker Desktop 已启动、"
             f"docker compose ps 中 mysql 为 healthy，且 .env 端口为 {settings.MYSQL_PORT}"
         )
+    if not settings.MOCK_WORKER:
+        async with AsyncSessionLocal() as session:
+            for column in (GenerationOutbox.work_id, GenerationAttempt.id, GenerationExecution.work_id):
+                await session.execute(select(column).limit(1))
     if not await _wait_service(check_redis, "Redis"):
         raise RuntimeError(
             "Redis 连接失败：请确认 Docker Desktop 已启动、"
