@@ -10,7 +10,7 @@ FastAPI、Worker、Beat 和 Dispatcher 使用同一套 MySQL、Redis、对象存
 python -m pip install -r backend/worker/requirements.txt
 ```
 
-真实生成需设置 `MOCK_WORKER=false`、`MINIMAX_API_KEY`、`MINIMAX_BASE_URL`（默认 `https://api.minimax.cn`），以及 `CELERY_TASK_MODULE=worker.tasks`、`CELERY_TASK_FUNC=enqueue_video_generation`。通过本地环境变量或未纳入版本控制的 `.env` 提供密钥。Linux 或 WSL 需安装带 libx264 和 AAC 的 FFmpeg。若 FFmpeg 不在 PATH，设置 `I2V_FFMPEG`。
+真实生成需设置 `MOCK_WORKER=false`、`MINIMAX_API_KEY`、`MINIMAX_BASE_URL`（默认 `https://api.minimax.cn`），以及 `CELERY_TASK_MODULE=worker.tasks`、`CELERY_TASK_FUNC=enqueue_video_generation`。通过本地环境变量或未纳入版本控制的 `.env` 提供密钥。Linux 或 WSL 需安装带 libx264 和 AAC 的 FFmpeg，同套安装中需包含 FFprobe。工具不在 PATH 时分别设置 `I2V_FFMPEG`、`I2V_FFPROBE`。
 
 在 `backend/` 下分别运行以下长期进程。生成 Worker 可先用并发 1，生产并发按实际压测调整。单独启动一个恢复 Worker，使扫描不被长时间的视频任务占住。每套共享数据库和队列只启动一个 Beat。
 
@@ -27,6 +27,7 @@ python -m celery -A worker.tasks:celery_app beat --schedule=/tmp/i2v-worker-beat
 | --- | --- | --- |
 | `I2V_LEASE_SECONDS` | 60 秒 | MySQL 租约及 Redis 并发槽有效期 |
 | `I2V_HEARTBEAT_SECONDS` | 15 秒 | 续租频率，必须小于租期的一半 |
+| `I2V_MEDIA_TMP_DIR` | 系统临时目录下的 `i2v-media` | 两个 Worker 可访问的本机临时空间，按尝试及租约隔离 |
 | `I2V_POLL_INTERVAL_SECONDS` | 5 秒 | MiniMax 查询间隔 |
 | `I2V_RECONCILE_MAX_HOURS` | 6 小时 | 已知任务在同一尝试状态停留的人工核对阈值 |
 | `I2V_ACCOUNT_CONCURRENCY` | 30 | Redis 中的账号级并发槽上限，生产初始值按并发预算设置 |
@@ -40,7 +41,7 @@ python -m celery -A worker.tasks:celery_app beat --schedule=/tmp/i2v-worker-beat
 `generation_manual_review` 提供 Work、尝试、请求及已知供应商任务的标识。MiniMax 查询接口需要供应商任务 ID。只有运营人员已经通过独立证据确认某个上游任务与本地请求相符时，才能通过受控 Shell 录入该 ID。命令会向供应商核验 ID 与状态，并禁止覆盖已有的不同 ID。
 
 ```bash
-python -m worker.generation_reconciler WORK_ID REQUEST_ID TASK_ID --confirm-provider-correlation
+python -m worker.generation_reconciler WORK_ID REQUEST_ID TASK_ID --confirm-provider-correlation --reason INC-123
 ```
 
-缺少关联证据时保留人工核对状态。恢复进程继续派发有明确上游任务 ID 的工作。定向和故障注入用法见[实施报告](../../docs/production-audit/phase-2/IMPLEMENTATION_REPORT.md)。
+缺少关联证据时保留人工核对状态。绑定会记录操作系统账号、证据编号和状态变化。恢复进程继续派发有明确上游任务 ID 的工作。媒体验真、磁盘预算和第三阶段回滚见[实施报告](../../docs/production-audit/phase-3/IMPLEMENTATION_REPORT.md)。

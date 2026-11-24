@@ -32,11 +32,13 @@ from worker import artifacts, execution, outbox_dispatcher, pipeline
 from worker.attempts import change_attempt, prepare_attempt
 from worker.state import load_job, stale_work_ids
 from worker.tasks import QUEUE, enqueue_video_generation, reconcile_stale
+from worker.test_media import media_tools as media_tools, sample_factory as sample_factory
 
 CHILD = """
 from pathlib import Path
 from threading import Event
 from time import sleep
+import os
 import sys
 from worker import pipeline
 from worker.artifacts import upload
@@ -74,7 +76,7 @@ if stage == "uploading":
     attempt = change_attempt(attempt, "submitting", lease=lease)
     attempt = change_attempt(attempt, "accepted", lease=lease, task_id="fixture-artifact")
     change_attempt(attempt, "uploading", lease=lease)
-    upload(lease, "videos/phase2-upload-" + marker.parent.name + ".mp4", b"sample artifact bytes", Event())
+    upload(lease, "videos/phase2-upload-" + marker.parent.name + ".mp4", Path(os.environ["I2V_TEST_VALID_MP4"]), Event())
     halt()
 else:
     pipeline.generate(load_job(work_id), 15, "16:9", lease=lease, lost=Event())
@@ -205,12 +207,20 @@ async def test_force_kill_and_takeover(
     monkeypatch,
     tmp_path,
     provider_server,
+    request,
 ):
     work_id = await submit(admin_client, candidate_client_factory, monkeypatch)
     address, calls, configure = provider_server
     marker = tmp_path / "checkpoint"
     configure(marker, hold_response=stage == "awaiting_response")
-    await asyncio.to_thread(terminate_at_checkpoint, work_id, stage, marker, address)
+    child_env = None
+    if stage == "uploading":
+        factory = request.getfixturevalue("sample_factory")
+        from worker.media import transcode
+
+        path = transcode(factory(dimensions="1280x720"), tmp_path / "validated.mp4", 15, monotonic() + 60)
+        child_env = {"I2V_TEST_VALID_MP4": str(path)}
+    await asyncio.to_thread(terminate_at_checkpoint, work_id, stage, marker, address, extra_env=child_env)
     assert calls.count("create") == calls_before
     if stage == "uploading":
         with SyncSessionLocal.begin() as session:
@@ -249,7 +259,7 @@ async def test_force_kill_and_takeover(
 
 
 async def test_concurrent_claim_heartbeat_and_stale_writes(
-    admin_client, candidate_client_factory, monkeypatch
+    admin_client, candidate_client_factory, monkeypatch, tmp_path
 ):
     work_id = await submit(admin_client, candidate_client_factory, monkeypatch)
     assert not execution.reserve_recovery(work_id)
@@ -279,8 +289,10 @@ async def test_concurrent_claim_heartbeat_and_stale_writes(
         execution.renew(old)
     with pytest.raises(ExecutionStopped):
         change_attempt(attempt, "submitting", lease=old)
+    stale_path = tmp_path / "old.mp4"
+    stale_path.write_bytes(b"old bytes")
     with pytest.raises(ExecutionStopped):
-        artifacts.upload(old, "videos/phase2-stale.mp4", b"old bytes", Event())
+        artifacts.upload(old, "videos/phase2-stale.mp4", stale_path, Event())
     with pytest.raises(ExecutionStopped):
         handoff_sync.mark_work_succeeded(work_id, "videos/old.mp4", 3, 15, 1, "old", lease=old)
     failed = change_attempt(attempt, "failed", error="INVALID_IMAGE", lease=new)
@@ -441,9 +453,7 @@ async def test_api_and_dispatcher_killed_at_commit_boundaries(
 
 
 async def test_database_unavailable_cannot_mark_uploaded_work_successful(
-    admin_client,
-    candidate_client_factory,
-    monkeypatch,
+    admin_client, candidate_client_factory, monkeypatch, sample_factory, tmp_path
 ):
     work_id = await submit(admin_client, candidate_client_factory, monkeypatch)
     lease = execution.acquire(work_id, from_outbox=True, max_seconds=90)
@@ -451,7 +461,10 @@ async def test_database_unavailable_cannot_mark_uploaded_work_successful(
     attempt = change_attempt(attempt, "submitting", lease=lease)
     attempt = change_attempt(attempt, "accepted", lease=lease, task_id="db-failure-fixture")
     change_attempt(attempt, "uploading", lease=lease)
-    artifact = artifacts.upload(lease, f"videos/phase2-db-{uuid4().hex}.mp4", b"fixture video", Event())
+    from worker.media import transcode
+
+    path = transcode(sample_factory(dimensions="1280x720"), tmp_path / "validated.mp4", 15, monotonic() + 60)
+    artifact = artifacts.upload(lease, f"videos/phase2-db-{uuid4().hex}.mp4", path, Event())
     with socket.socket() as unserved:
         unserved.bind(("127.0.0.1", 0))
         failed_engine = create_engine(
@@ -467,7 +480,9 @@ async def test_database_unavailable_cannot_mark_uploaded_work_successful(
         failed_engine.dispose()
     with SyncSessionLocal() as session:
         assert session.get(Work, work_id).task_status == "running"
-    assert artifacts.recover(lease) == artifact
+    assert (
+        artifacts.recover(lease, tmp_path / "restored.mp4", 15, "768P", monotonic() + 30, Event()) == artifact
+    )
     handoff_sync.mark_work_succeeded(
         work_id, artifact.key, artifact.size, 15, 1, "db-failure-fixture", lease=lease
     )

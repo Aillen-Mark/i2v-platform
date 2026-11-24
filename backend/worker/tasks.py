@@ -14,6 +14,7 @@ from app.core.database import sync_engine
 from worker.config import worker_settings
 from worker.execution import acquire, maintain, reserve_recovery
 from worker.generation_reconciler import log_recovery_backlog, review_due_submissions
+from worker.media_workspace import cleanup_orphans
 from worker.pipeline import generate
 from worker.state import (
     TASK_SECONDS,
@@ -59,6 +60,8 @@ def validate_worker(**_kwargs) -> None:
         raise SystemExit("Set MINIMAX_BASE_URL to an HTTPS endpoint in production.")
     if not which(options.I2V_FFMPEG):
         raise SystemExit("Install ffmpeg or set I2V_FFMPEG to its executable.")
+    if not which(options.I2V_FFPROBE):
+        raise SystemExit("Install ffprobe or set I2V_FFPROBE to its executable.")
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
@@ -115,6 +118,7 @@ def enqueue_video_generation(
 def reconcile_stale() -> None:
     review_due_submissions()
     log_recovery_backlog()
+    cleanup_orphans()
     for work_id in stale_work_ids():
         if reserve_recovery(work_id):
             try:

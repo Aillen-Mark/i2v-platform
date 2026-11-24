@@ -1,15 +1,20 @@
 """Persist and transition provider attempts under the Work row lock."""
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select
 
 from app.core.database import SyncSessionLocal
-from app.core.timeutil import utcnow
 from app.models import GenerationAttempt, Work
-from app.services.execution_lease import ExecutionLease, ExecutionStopped, active_work, check_lease
+from app.services.execution_lease import (
+    ExecutionLease,
+    ExecutionStopped,
+    active_work,
+    check_lease,
+    database_now,
+)
 from worker.minimax import valid_task_id
 
 logger = logging.getLogger(__name__)
@@ -39,7 +44,7 @@ def latest_attempt(session, work_id: int) -> GenerationAttempt | None:
 
 
 def _new_attempt(session, work: Work, status: str, attempt_no: int, *, task_id: str | None = None):
-    now = utcnow()
+    now = database_now(session)
     attempt = GenerationAttempt(
         work_id=work.id,
         attempt_no=attempt_no,
@@ -83,13 +88,13 @@ def transition(
     attempt: GenerationAttempt,
     target: str,
     *,
+    now: datetime,
     error: str | None = None,
     task_id: str | None = None,
     retry_create: bool = False,
 ) -> None:
     if target not in TRANSITIONS.get(attempt.status, ()):
         raise ExecutionStopped(f"Invalid attempt transition {attempt.status} -> {target}")
-    now = utcnow()
     if target == "submitting":
         attempt.request_started_at = now
     if attempt.status == "submitting" and target in {"accepted", "failed"}:
@@ -112,7 +117,7 @@ def note_query(attempt: GenerationAttempt, lease: ExecutionLease) -> None:
         current = latest_attempt(session, work.id)
         if current is None or current.id != attempt.id or current.status != attempt.status:
             raise ExecutionStopped(work.id)
-        current.last_checked_at = utcnow()
+        current.last_checked_at = database_now(session)
 
 
 def change_attempt(
@@ -124,7 +129,7 @@ def change_attempt(
         current = latest_attempt(session, work.id)
         if current is None or current.id != attempt.id or current.status != attempt.status:
             raise ExecutionStopped(work.id)
-        transition(current, target, **options)
+        transition(current, target, now=database_now(session), **options)
         if target in {"submitting", "submission_unknown", "accepted"}:
             work.task_status = "running"
         if target == "accepted":

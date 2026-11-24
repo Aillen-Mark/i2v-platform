@@ -2,26 +2,27 @@
 
 import logging
 from datetime import timedelta
-from pathlib import Path
 from random import uniform
-from tempfile import TemporaryDirectory
-from time import sleep, time
+from time import monotonic, sleep
 
 import httpx
 from billiard.exceptions import SoftTimeLimitExceeded
 from redis.exceptions import RedisError
 
+from app.core.database import SyncSessionLocal
 from app.core.timeutil import utcnow
 from app.services.handoff_sync import (
     _remove_from_wait_queue,
     mark_work_failed_and_refund,
     mark_work_succeeded,
 )
-from app.services.execution_lease import ExecutionLease, ExecutionStopped
+from app.services.execution_lease import ExecutionLease, ExecutionStopped, database_now
 from worker import artifacts
 from worker.attempts import UNKNOWN, change_attempt, note_query, prepare_attempt
 from worker.config import worker_settings
 from worker.media import prepare_first_frame, prepare_video, remaining_seconds
+from worker.media_process import MediaError
+from worker.media_workspace import workspace
 from worker.minimax import MESSAGES, GenerationError, MiniMax
 from worker.state import TASK_SECONDS, Job, record_outcome
 
@@ -38,9 +39,12 @@ def create_upstream(provider, job, attempt, duration: int, ratio: str, deadline:
     try:
         if engine is None or engine.provider != "minimax":
             raise GenerationError()
-        image = prepare_first_frame(work.image_key, ratio, deadline)
+        with workspace(lease, attempt.id) as directory:
+            image = prepare_first_frame(work.image_key, ratio, deadline, directory, lost)
         timeout = min(20, remaining_seconds(deadline))
     except GenerationError as error:
+        if isinstance(error, MediaError):
+            log_media_failure(attempt, lease, error)
         return change_attempt(
             attempt, "failed", lease=lease, error=error.code, retry_create=error.retry == "resume"
         )
@@ -130,18 +134,46 @@ def finish(job, attempt, artifact, duration, deadline, lease, lost) -> None:
     settle(job, True, seconds)
 
 
+def log_media_failure(attempt, lease, error: MediaError) -> None:
+    logger.warning(
+        "media_processing_failed work_id=%s attempt_id=%s lease_generation=%s reason=%s recoverable=%s",
+        lease.work_id,
+        attempt.id,
+        lease.generation,
+        error.reason,
+        bool(error.retry),
+    )
+
+
 def upload_and_finish(client, job, attempt, url, duration, deadline, lease, lost) -> None:
-    with TemporaryDirectory(prefix="i2v-") as directory:
-        data = prepare_video(client, url, Path(directory), duration, deadline)
-        remaining_seconds(deadline)
+    resolution = job.engine.resolution if job.engine else None
+    with workspace(lease, attempt.id) as directory:
+        path = prepare_video(client, url, directory, duration, deadline, lost, resolution=resolution)
         require_heartbeat(lease, lost)
         key = f"videos/generated/{job.work.id}/{job.work.task_no}-{lease.generation}.mp4"
-        artifact = artifacts.upload(lease, key, data, lost)
-    finish(job, attempt, artifact, duration, deadline, lease, lost)
+        artifact = artifacts.upload(lease, key, path, lost, deadline=deadline)
+        finish(job, attempt, artifact, duration, deadline, lease, lost)
+
+
+def recover_uploaded(job, attempt, duration, deadline, lease, lost) -> bool:
+    resolution = job.engine.resolution if job.engine else None
+    with workspace(lease, attempt.id) as directory:
+        artifact = artifacts.recover(
+            lease, directory / "checkpoint.mp4", duration, resolution, deadline, lost
+        )
+        if artifact is None:
+            return False
+        finish(job, attempt, artifact, duration, deadline, lease, lost)
+    return True
+
+
+def attempt_overdue(attempt, hours: int) -> bool:
+    with SyncSessionLocal() as session:
+        return database_now(session) - attempt.updated_at >= timedelta(hours=hours)
 
 
 def generate(job: Job, duration: int, ratio: str, *, lease: ExecutionLease, lost) -> None:
-    deadline = time() + TASK_SECONDS
+    deadline = monotonic() + TASK_SECONDS
     work = job.work
     duration = work.duration_sec if work.duration_sec is not None else duration
     _remove_from_wait_queue(work.id)
@@ -160,13 +192,20 @@ def generate(job: Job, duration: int, ratio: str, *, lease: ExecutionLease, lost
                 if attempt.status == "prepared":
                     attempt = create_upstream(provider, job, attempt, duration, ratio, deadline, lease, lost)
                 if attempt.status == "uploading":
-                    artifact = artifacts.recover(lease)
-                    if artifact is not None:
-                        finish(job, attempt, artifact, duration, deadline, lease, lost)
-                        return
-                if attempt.status in ("accepted", "running", "uploading") and utcnow() - (
-                    attempt.updated_at
-                ) >= timedelta(hours=options.I2V_RECONCILE_MAX_HOURS):
+                    try:
+                        if recover_uploaded(job, attempt, duration, deadline, lease, lost):
+                            return
+                    except MediaError as error:
+                        log_media_failure(attempt, lease, error)
+                        if not error.retry:
+                            change_attempt(attempt, "manual_review", lease=lease, error=error.code)
+                            return
+                        # Persistent storage failure still reaches the overdue guard.
+                        if not attempt_overdue(attempt, options.I2V_RECONCILE_MAX_HOURS):
+                            raise
+                if attempt.status in ("accepted", "running", "uploading") and attempt_overdue(
+                    attempt, options.I2V_RECONCILE_MAX_HOURS
+                ):
                     code = "MEDIA_FAILED" if attempt.status == "uploading" else "RECONCILIATION_OVERDUE"
                     change_attempt(attempt, "manual_review", lease=lease, error=code)
                     return
@@ -175,8 +214,9 @@ def generate(job: Job, duration: int, ratio: str, *, lease: ExecutionLease, lost
                     if url:
                         try:
                             upload_and_finish(client, job, attempt, url, duration, deadline, lease, lost)
-                        except GenerationError as error:
-                            if error.retry is None and error.code == "MEDIA_FAILED":
+                        except MediaError as error:
+                            log_media_failure(attempt, lease, error)
+                            if error.retry is None:
                                 change_attempt(attempt, "manual_review", lease=lease, error=error.code)
                                 return
                             raise

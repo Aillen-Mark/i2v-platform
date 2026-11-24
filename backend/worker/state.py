@@ -11,9 +11,8 @@ from redis.exceptions import RedisError
 from sqlalchemy import or_, select
 
 from app.core.database import SyncSessionLocal
-from app.core.timeutil import utcnow
 from app.models import Engine, GenerationAttempt, GenerationExecution, GenerationOutbox, Work
-from app.services.execution_lease import ACTIVE_WORK, ExecutionStopped
+from app.services.execution_lease import ACTIVE_WORK, ExecutionStopped, database_now
 from app.services.handoff_sync import sync_redis
 from worker.config import worker_settings
 
@@ -102,7 +101,6 @@ def load_job(work_id: int) -> Job | None:
 
 def stale_work_ids() -> list[int]:
     """Find received or legacy work eligible for a durable recovery claim."""
-    now = utcnow()
     attempt_status = (
         select(GenerationAttempt.status)
         .where(GenerationAttempt.work_id == Work.id)
@@ -112,6 +110,7 @@ def stale_work_ids() -> list[int]:
         .scalar_subquery()
     )
     with SyncSessionLocal() as session:
+        now = database_now(session)
         return list(
             session.scalars(
                 select(Work.id)

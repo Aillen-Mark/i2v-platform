@@ -170,3 +170,7 @@ backend\.venv\Scripts\python.exe scripts\load_test_100.py # 100 并发压测（�
 7. **测试收尾等 Mock 协程**（`handoff.wait_mock_tasks`），全量用例约 73 秒。
 8. **`engines.price_per_sec` 默认 0**：M4 统计测试会把 `wq-v1`/`wq-v1-lite` 单价临时设为 0.5 / 0.2 元/秒来验证折算，用例跑完保留该值（无其它用例依赖单价）；本次交付后已手工重置为 0.0000，需要真实费用统计时在后台填单价即可。
 9. 未实现：Vue 3 双端前端（Phase 5）。
+
+## 生产稳定性 Issue 009
+
+真实生成 Worker 已增加 FFprobe 和全片解码验收。无音轨输入补静音 AAC，成片流式上传并读回校验。与 002/007 共用上游 ID、租约和对象检查点。启动、验证及回滚见[第三阶段实施报告](production-audit/phase-3/IMPLEMENTATION_REPORT.md)。

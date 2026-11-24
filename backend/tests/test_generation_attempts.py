@@ -8,11 +8,11 @@ from sqlalchemy import select, update
 
 from app.core.database import SyncSessionLocal
 from app.core.timeutil import utcnow
-from app.models import GenerationAttempt, Quota, Work
+from app.models import AuditLog, GenerationAttempt, Quota, Work
 from app.services.handoff_sync import mark_work_failed_and_refund
 from tests.test_generation_outbox import prepare_work
 from worker.attempts import ExecutionStopped, change_attempt, prepare_attempt
-from worker.generation_reconciler import link_verified_task, review_due_submissions
+from worker.generation_reconciler import link_verified_task, review_due_submissions, shell_operator
 from worker.minimax import GenerationError, MiniMax
 
 
@@ -80,9 +80,27 @@ async def test_uncertain_request_waits_for_verified_reconciliation(
     with httpx.Client(transport=httpx.MockTransport(reply)) as http:
         provider = MiniMax(http, "test", "https://billing.example.test")
         with pytest.raises(GenerationError):
-            link_verified_task(work_id, attempt.request_id, "invalid", provider)
+            link_verified_task(work_id, attempt.request_id, "invalid", provider, reason="INC-42")
         assert prepare_attempt(work_id).status == "manual_review"
-        link_verified_task(work_id, attempt.request_id, "confirmed-task", provider)
+        with pytest.raises(ValueError):
+            link_verified_task(
+                work_id, attempt.request_id, "confirmed-task", provider, reason="https://example.com"
+            )
+        link_verified_task(work_id, attempt.request_id, "confirmed-task", provider, reason="INC-42")
+    with SyncSessionLocal() as session:
+        audit = session.scalar(select(AuditLog).where(AuditLog.action == "link_provider_task"))
+        assert audit.admin_username == shell_operator()
+        assert audit.remark == "INC-42" and audit.created_at is not None
+        assert audit.before_val["status"] == "manual_review"
+        assert audit.after_val == {
+            "status": "accepted",
+            "work_id": work_id,
+            "attempt_id": attempt.id,
+            "request_id": attempt.request_id,
+            "provider_task_id": "confirmed-task",
+            "correlation_result": "provider_id_verified_operator_attested",
+            "provider_status": "running",
+        }
     accepted = prepare_attempt(work_id)
     assert accepted.id == attempt.id and accepted.status == "accepted"
     assert accepted.provider_task_id == "confirmed-task"
