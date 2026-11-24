@@ -102,15 +102,50 @@ def work_links(keys: set[str], sessions=SyncSessionLocal) -> dict[str, set[int]]
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class CheckpointClaim:
+    work_id: int
+    task_no: str | None
+    work_status: str | None
+    video_key: str | None
+    lease_generation: int
+    lease_expires_at: datetime | None
+    recover_after: datetime
+    expected_size: int | None
+    expected_sha256: str | None
+    active: bool
+
+
+def generated_owner(key: str) -> int | None:
+    match = GENERATED.fullmatch(key)
+    if match and len(match[1]) <= 20:
+        work_id = int(match[1])
+        if work_id <= 2**64 - 1:
+            return work_id
+    return None
+
+
 def object_claims(keys: set[str], sessions=SyncSessionLocal):
     """Get known checkpoint links plus Work owners inferred from generated keys."""
     if not keys:
-        return {}, {}
-    owners = {int(match[1]) for key in keys if (match := GENERATED.fullmatch(key)) and len(match[1]) <= 19}
+        return {}, set()
+    owners = {owner for key in keys if (owner := generated_owner(key)) is not None}
     checkpoints = defaultdict(list)
     with sessions() as session:
         now = database_now(session)
-        for key, work_id, owner, generation, expires, recover_after, status in session.execute(
+        for (
+            key,
+            work_id,
+            owner,
+            generation,
+            expires,
+            recover_after,
+            size,
+            digest,
+            status,
+            task_no,
+            video_key,
+        ) in session.execute(
             select(
                 GenerationExecution.artifact_key,
                 GenerationExecution.work_id,
@@ -118,19 +153,40 @@ def object_claims(keys: set[str], sessions=SyncSessionLocal):
                 GenerationExecution.lease_generation,
                 GenerationExecution.lease_expires_at,
                 GenerationExecution.recover_after,
+                GenerationExecution.artifact_size,
+                GenerationExecution.artifact_sha256,
                 Work.task_status,
+                Work.task_no,
+                Work.video_key,
             )
             .outerjoin(Work, Work.id == GenerationExecution.work_id)
             .where(GenerationExecution.artifact_key.in_(keys))
         ):
             if key in keys:
                 checkpoints[key].append(
-                    (
+                    CheckpointClaim(
                         work_id,
-                        bool(owner and expires and expires > now) or status in ACTIVE_WORK,
+                        task_no,
+                        status,
+                        video_key,
                         generation,
+                        expires,
                         recover_after,
+                        size,
+                        digest,
+                        bool(owner and expires and expires > now) or status in ACTIVE_WORK,
                     )
                 )
-        inferred = dict(session.execute(select(Work.id, Work.task_status).where(Work.id.in_(owners))).all())
-    return checkpoints, inferred
+        active_owners = set(
+            session.scalars(select(Work.id).where(Work.id.in_(owners), Work.task_status.in_(ACTIVE_WORK)))
+        )
+        active_owners.update(
+            session.scalars(
+                select(GenerationExecution.work_id).where(
+                    GenerationExecution.work_id.in_(owners),
+                    GenerationExecution.lease_owner.is_not(None),
+                    GenerationExecution.lease_expires_at > now,
+                )
+            )
+        )
+    return checkpoints, active_owners

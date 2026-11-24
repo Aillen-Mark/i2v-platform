@@ -27,3 +27,7 @@ python -m worker.object_backup backup --output reports/object-backup
 备份目标由环境配置，未配置返回 OFFSITE_NOT_CONFIGURED。隔离 S3 测试覆盖备份、清单和恢复。全量回归 119 项通过，0 失败。最终对象相关用例复测 9 项通过。真实 MinIO、签名过期和异地故障域仍待验证。测试结果、命令与逐项证据见[测试报告](TEST_REPORT.md)，共同恢复顺序见[运维手册](BACKUP_RESTORE_RUNBOOK.md)。
 
 下一阶段启动前应先在计划的 MinIO 版本和独立目标上验证条件 PUT、签名有效期、端到端恢复和 5 Mbps 下的资源预算。Issue 006 留待单独启动。
+
+## 收尾版本
+
+收尾增加 HTTPS 门禁、失效检查点及备份完成级别，使用时以[收尾实施报告](../phase-4-final/IMPLEMENTATION_REPORT.md)为准。

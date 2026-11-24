@@ -70,3 +70,7 @@ python -m pytest -p no:cacheprovider tests worker/test_worker.py worker/test_med
 全量回归 **119 通过，0 失败，0 跳过，214.84 秒**。最终对账游标刷新和实际截断 PUT 用例更新后，重跑 `python -m pytest -p no:cacheprovider tests/test_object_operations.py -q -rA`，**9 通过，0 失败，33.76 秒**。两次运行有重叠，不合计。未配置目标和非法对账页大小的 CLI 冒烟均返回 3。
 
 真实 MinIO、Provider 端私有权限/原生校验和、真实异地 S3 故障域、目标机器与实际 5 Mbps 公网链路、真实 CDN 回源、目标站点 RPO/RTO 均为 BLOCKED。Docker Hub 配置代理连接超时，官方归档直链返回 410。已完成的本机测试不计作异地验收。
+
+## 收尾回归
+
+上面的 119 项为原始第四阶段证据。T57–T91、重跑结果和真实环境阻塞另见[收尾测试报告](../phase-4-final/TEST_REPORT.md)。

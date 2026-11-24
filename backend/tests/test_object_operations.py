@@ -202,11 +202,12 @@ def test_backup_partial_unconfigured_and_conflicting_dedup(stores, tmp_path):
     put(source, "old-key", ready)
     seed_work("absent-key", 3)
     result, _ = backup_objects(source, None, tmp_path, local_drill=True)
-    assert result["status"] == "OFFSITE_NOT_CONFIGURED"
+    assert (result["status"], result["consistency_status"]) == ("OFFSITE_NOT_CONFIGURED", "NOT_APPLICABLE")
     result, _ = backup_objects(
         source, back, tmp_path, prefix=PREFIX, local_drill=True, budget=TransferBudget(30, 0)
     )
-    assert result["status"] == "PARTIAL" and result["verified_count"] == result["failed_count"] == 1
+    assert (result["status"], result["consistency_status"]) == ("PARTIAL", "INCONSISTENT")
+    assert result["verified_count"] == result["failed_count"] == 1
     assert back.head(f"{PREFIX}/runs/{result['backup_id']}/seal.sha256") is None
     rejected, _ = restore_objects(
         back,
@@ -327,7 +328,7 @@ def test_real_backup_restore_and_seals(stores, tmp_path, sample_factory, request
     repeated, _ = backup_objects(source, back, tmp_path, budget=TransferBudget(35, 0), **kw)
     assert repeated["status"] == "COMPLETE" and repeated["skipped_count"] == 1
     archive = fetch_database(
-        back, PREFIX, result["backup_id"], tmp_path / "downloaded", TransferBudget(20, 0)
+        back, PREFIX, result["backup_id"], tmp_path / "downloaded", TransferBudget(20, 0), local_drill=True
     )
     assert file_digest(archive / "database.sql.gz").sha256 == result["database_backup_hash"]
     summary, _ = restore_objects(
@@ -338,8 +339,10 @@ def test_real_backup_restore_and_seals(stores, tmp_path, sample_factory, request
         tmp_path,
         budget=TransferBudget(40, 0),
         sessions=restored_db,
+        allow_unlinked_drill=True,
     )
     assert summary["status"] == "COMPLETE" and summary["media_verified_count"] == 1
+    assert summary["restore_mode"] == "LOCAL_DRILL"
     assert read_object(target, "old/key/作品.mp4", size, TransferBudget(10, 0)) == expected
     repeated, _ = restore_objects(
         back,
@@ -349,6 +352,7 @@ def test_real_backup_restore_and_seals(stores, tmp_path, sample_factory, request
         tmp_path,
         budget=TransferBudget(40, 0),
         sessions=restored_db,
+        allow_unlinked_drill=True,
     )
     assert repeated["status"] == "COMPLETE" and repeated["already_present_count"] == 1
     conflict = b"other contents"
@@ -361,11 +365,28 @@ def test_real_backup_restore_and_seals(stores, tmp_path, sample_factory, request
         tmp_path,
         budget=TransferBudget(30, 0),
         sessions=restored_db,
+        allow_unlinked_drill=True,
     )
     assert summary["status"] == "FAILED" and summary["error"] == "destination_size_or_sha256_mismatch"
     assert read_object(
         target, "old/key/作品.mp4", len(conflict), TransferBudget(10, 0)
     ).sha256 == digest_bytes(conflict)
+    archive_key = f"{PREFIX}/runs/{result['backup_id']}/database/metadata.txt"
+    original_metadata = (folder / "metadata.txt").read_bytes()
+    put(back, archive_key, b"x" * len(original_metadata))
+    failed, _ = restore_objects(
+        back,
+        target,
+        PREFIX,
+        result["backup_id"],
+        tmp_path,
+        budget=TransferBudget(30, 0),
+        sessions=restored_db,
+        allow_unlinked_drill=True,
+    )
+    assert failed["status"] == "FAILED" and failed["error"] == "database_archive_sha256_mismatch"
+    assert failed["restored_count"] == 0
+    put(back, archive_key, original_metadata)
     put(back, f"{PREFIX}/runs/{result['backup_id']}/objects.jsonl", b"tampered")
     summary, _ = restore_objects(
         back,
@@ -375,6 +396,7 @@ def test_real_backup_restore_and_seals(stores, tmp_path, sample_factory, request
         tmp_path,
         budget=TransferBudget(30, 0),
         sessions=restored_db,
+        allow_unlinked_drill=True,
     )
     assert summary["status"] == "FAILED" and not summary["restored_count"]
 
@@ -441,7 +463,7 @@ def test_backup_retries_after_real_s3_connection_drop(stores, tmp_path, monkeypa
         finally:
             server.shutdown()
             thread.join(timeout=2)
-    assert hit.is_set() and result["status"] == "COMPLETE"
+    assert hit.is_set() and result["status"] == "OBJECTS_COMPLETE"
     assert result["copied_count"] == 1
     assert source.head("data.mp4").size == len(contents)
 
@@ -535,3 +557,297 @@ def test_backup_target_connection_failure_never_mutates_source(stores, tmp_path)
     assert read_object(source, "original", len(content), TransferBudget(10, 0)).sha256 == digest_bytes(
         content
     )
+
+
+def run_backup_cli(monkeypatch, argv):
+    import sys
+
+    from worker.object_backup import main
+
+    monkeypatch.setattr(sys, "argv", ["object_backup", *argv])
+    monkeypatch.setattr(os, "umask", lambda _: None)
+    try:
+        return main()
+    except SystemExit as error:
+        return error.code
+
+
+@pytest.mark.parametrize(
+    "endpoint,drill,production,allowed",
+    [
+        ("http://restore.example.test", False, False, False),
+        ("https://restore.example.test", False, False, True),
+        ("http://127.0.0.1:19008", True, False, True),
+        ("http://127.0.0.1:19008", True, True, False),
+        ("https://127.0.0.2", False, False, False),
+        ("https://[::ffff:127.0.0.1]", False, False, False),
+        ("https://localhost.", False, False, False),
+        ("https://user:pass@restore.example.test", True, False, False),
+        ("https://@restore.example.test", True, False, False),
+        ("https://restore.example.test/path", True, False, False),
+        ("https://restore.example.test?query", True, False, False),
+        ("https://restore.example.test#", True, False, False),
+        ("https://restore.example.test:invalid", True, False, False),
+    ],
+)
+def test_restore_cli_endpoint_security(endpoint, drill, production, allowed, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from worker import object_backup
+
+    for role, url in (("BACKUP", "https://backup.example.test"), ("RESTORE", endpoint)):
+        for name, value in (
+            ("ENDPOINT", url),
+            ("ACCESS_KEY", "fixture"),
+            ("SECRET_KEY", "fixture"),
+            ("BUCKET", role.lower() + "-fixture"),
+        ):
+            monkeypatch.setenv(f"I2V_{role}_S3_{name}", value)
+    monkeypatch.setattr(object_backup, "get_settings", lambda: SimpleNamespace(is_production=production))
+    calls = []
+
+    def restore(_backup, target, *_args, **kwargs):
+        calls.append((target.client.meta.endpoint_url, kwargs["allow_unlinked_drill"]))
+        return {"status": "COMPLETE"}, tmp_path
+
+    monkeypatch.setattr(object_backup, "restore_objects", restore)
+    args = ["--local-drill"] if drill else []
+    args += ["restore", "fixture", "--output", str(tmp_path), "--confirm-isolated-target"]
+    assert run_backup_cli(monkeypatch, args) == (0 if allowed else 3)
+    assert calls == ([(endpoint, drill)] if allowed else [])
+
+
+def test_checkpoint_classes_remain_read_only_across_pages(stores, tmp_path):
+    source, _, _ = stores
+    data = b"checkpoint"
+    digest = digest_bytes(data)
+    size = len(data)
+    live = seed_work(None, size, digest, status="failed", checkpoint="p1-live")
+    expired_work = seed_work(None, size, digest, status="running", checkpoint="p2-active-expired")
+    stale = seed_work(None, size, digest, status="failed", checkpoint="p3-stale")
+    finished = seed_work("p4-finished", size, digest)
+    superseded = seed_work("p5-final", size, digest, checkpoint="p6-older")
+    seed_work(None, size, status="failed", checkpoint="p7-contested")
+    seed_work(None, size, status="failed", checkpoint="p7-contested")
+    orphan = "videos/generated/9876543/EXAMPLE-1.mp4"
+    unknown = "videos/generated/99999999999999999999/BAD-1.mp4"
+    for key in (
+        "p1-live",
+        "p2-active-expired",
+        "p3-stale",
+        "p4-finished",
+        "p5-final",
+        "p6-older",
+        "p7-contested",
+        orphan,
+        unknown,
+    ):
+        put(source, key, data)
+    future = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=10)
+    past = future - timedelta(minutes=20)
+    with SyncSessionLocal.begin() as session:
+        for work_id, expiry in ((live, future), (expired_work, past), (stale, past)):
+            execution = session.get(GenerationExecution, work_id)
+            execution.lease_owner = "a" * 32
+            execution.lease_expires_at = expiry
+
+    def database_rows():
+        with SyncSessionLocal() as session:
+            return tuple(
+                session.execute(select(model.__table__).order_by(*model.__table__.primary_key)).all()
+                for model in (Work, GenerationExecution)
+            )
+
+    before = database_rows()
+    objects_before = source.page(100)[0]
+    rows = []
+    cursor = None
+    for _ in range(10):
+        code, payload, report = run_check(
+            source, tmp_path, mode="full", limit=2, resume=cursor, grace_days=-1
+        )
+        rows += payload["findings"]
+        cursor = json.loads(report.with_suffix(".cursor.json").read_text(encoding="utf-8"))
+        if payload["summary"]["stale_checkpoint_count"]:
+            assert code == 1
+            assert "STALE_CHECKPOINT" in report.with_suffix(".csv").read_text(encoding="utf-8")
+        if cursor["cursor"]["work_done"] and cursor["cursor"]["object_done"]:
+            break
+    else:
+        pytest.fail("resume did not finish both scans")
+    result = {row["object_key"]: row for row in rows}
+    assert (
+        result["p1-live"]["classification"]
+        == result["p2-active-expired"]["classification"]
+        == "ACTIVE_CHECKPOINT"
+    )
+    assert result["p3-stale"]["classification"] == result["p6-older"]["classification"] == "STALE_CHECKPOINT"
+    assert result["p6-older"]["work_id"] == superseded
+    row = result["p3-stale"]
+    assert row["work_id"] == stale and row["task_no"].startswith("TEST-")
+    assert row["work_status"] == "failed" and row["lease_generation"] == 1
+    assert row["lease_expires_at"] == past.replace(tzinfo=UTC).isoformat()
+    assert row["recover_after"] and row["detected_at"] and row["error_reason"]
+    assert row["expected_size"] == row["actual_size"] == size and row["expected_sha256"] == digest
+    assert (
+        result["p4-finished"]["classification"] == "HEALTHY" and result["p4-finished"]["work_id"] == finished
+    )
+    assert result["p7-contested"]["classification"] == "REFERENCE_CONFLICT"
+    assert (
+        result[orphan]["classification"] == "ORPHAN_OBJECT"
+        and result[unknown]["classification"] == "UNCLASSIFIED_OBJECT"
+    )
+    assert database_rows() == before and source.page(100)[0] == objects_before
+    for item in objects_before:
+        assert read_object(source, item.key, size, TransferBudget(10, 0)).sha256 == digest
+    _, quick, _ = run_check(source, tmp_path)
+    assert quick["summary"]["grace_period_count"] == 1
+
+
+def test_object_only_backup_recovery_and_cli(stores, tmp_path, monkeypatch):
+    source, back, target = stores
+    key = "videos/mock/object-drill.mp4"
+    data = b"mock object for isolated recovery only"
+    seed_work(key, len(data), digest_bytes(data))
+    put(source, key, data)
+    result, report = backup_objects(
+        source, back, tmp_path, prefix=PREFIX, local_drill=True, budget=TransferBudget(20, 0)
+    )
+    assert (result["status"], result["consistency_status"]) == ("OBJECTS_COMPLETE", "OBJECTS_ONLY")
+    assert result["schema_version"] == 2 and result["inventory_complete"] is True
+    assert json.loads((report / "objects.jsonl").read_text(encoding="utf-8"))["schema_version"] == 2
+
+    refused, _ = restore_objects(
+        back, target, PREFIX, result["backup_id"], tmp_path, budget=TransferBudget(20, 0)
+    )
+    assert refused["status"] == "FAILED" and target.head(key) is None
+    with pytest.raises(ValueError, match="no permitted recovery point"):
+        fetch_database(
+            back, PREFIX, result["backup_id"], tmp_path / "no-db", TransferBudget(20, 0), local_drill=True
+        )
+    restored, path = restore_objects(
+        back,
+        target,
+        PREFIX,
+        result["backup_id"],
+        tmp_path,
+        budget=TransferBudget(20, 0),
+        allow_unlinked_drill=True,
+    )
+    assert restored["status"] == "COMPLETE" and restored["restore_mode"] == "LOCAL_DRILL_OBJECTS_ONLY"
+    assert json.loads(path.read_text(encoding="utf-8"))["restore_mode"] == restored["restore_mode"]
+    assert read_object(target, key, len(data), TransferBudget(10, 0)).sha256 == digest_bytes(data)
+
+    from worker import object_backup
+
+    monkeypatch.setattr(object_backup, "ObjectStore", lambda _: source)
+    monkeypatch.setattr(object_backup, "configured_store", lambda *_args, **_kwargs: back)
+    args = ["--local-drill", "--prefix", PREFIX, "--rate-kib", "1024", "backup", "--output", str(tmp_path)]
+    assert run_backup_cli(monkeypatch, args) == 4
+
+
+def test_archive_failures_cannot_publish_common_recovery_point(stores, tmp_path, monkeypatch, request):
+    from worker import object_backup
+    from app.core.storage import ObjectConflict
+
+    source, back, _ = stores
+    data = b"object from a real MySQL snapshot"
+    seed_work("video", len(data), digest_bytes(data))
+    put(source, "video", data)
+    folder, restored_db = request.getfixturevalue("snapshot")
+    options = dict(prefix=PREFIX, snapshot=folder, confirmed=True, local_drill=True, sessions=restored_db)
+    original = object_backup.store_verified
+
+    def missing(store, key, *args, **kwargs):
+        if key.endswith("/database/metadata.txt"):
+            raise ObjectConflict("archive publication failed in fixture")
+        return original(store, key, *args, **kwargs)
+
+    monkeypatch.setattr(object_backup, "store_verified", missing)
+    partial, _ = backup_objects(source, back, tmp_path, budget=TransferBudget(20, 0), **options)
+    assert partial["verified_count"] == 1
+    assert (partial["status"], partial["consistency_status"]) == ("PARTIAL", "INCONSISTENT")
+    assert back.head(f"{PREFIX}/runs/{partial['backup_id']}/seal.sha256") is None
+
+    with (folder / "database.sql.gz").open("ab") as stream:
+        stream.write(b"corruption fixture")
+    with pytest.raises(ValueError, match="MySQL backup checksum mismatch"):
+        backup_objects(source, back, tmp_path, budget=TransferBudget(20, 0), **options)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "edited_status",
+        "resealed_partial",
+        "resealed_failed",
+        "resealed_missing_inventory",
+        "legacy_orphaned_status",
+        "legacy_false_consistency",
+        "legacy_object_drill",
+    ],
+)
+def test_seal_state_matrix(stores, tmp_path, variant):
+    source, back, target = stores
+    key = "videos/mock/legacy-seal.mp4"
+    data = b"sealed fixture"
+    seed_work(key, len(data), digest_bytes(data))
+    put(source, key, data)
+    result, _ = backup_objects(
+        source, back, tmp_path, prefix=PREFIX, local_drill=True, budget=TransferBudget(20, 0)
+    )
+    anchor = f"{PREFIX}/runs/{result['backup_id']}"
+    seal = dict(result)
+    if variant == "edited_status":
+        seal["status"] = "COMPLETE"
+    elif variant.startswith("legacy_"):
+        seal["schema_version"] = 1
+        seal["status"] = "COMPLETE"
+        seal["consistency_status"] = "CONSISTENT" if variant.endswith("false_consistency") else "INCONSISTENT"
+        if variant == "legacy_orphaned_status":
+            seal["database_backup_id"] = "abandoned-archive"
+        payload = (
+            json.dumps(
+                {
+                    "status": "VERIFIED",
+                    "work_id": 1,
+                    "task_no": "",
+                    "object_key": key,
+                    "duration": 15,
+                    "kind": "mock",
+                    "size": len(data),
+                    "sha256": digest_bytes(data),
+                }
+            )
+            + "\n"
+        ).encode()
+        if variant == "legacy_object_drill":
+            with SyncSessionLocal() as session:
+                work = session.scalar(select(Work).where(Work.video_key == key))
+                row = json.loads(payload)
+                row.update(work_id=work.id, task_no=work.task_no)
+                payload = (json.dumps(row) + "\n").encode()
+        put(back, f"{anchor}/objects.jsonl", payload)
+        seal.update(object_manifest_size=len(payload), object_manifest_hash=digest_bytes(payload))
+    elif variant == "resealed_missing_inventory":
+        seal.pop("inventory_complete")
+    else:
+        seal["status"] = variant.removeprefix("resealed_").upper()
+    seal_bytes = json.dumps(seal).encode()
+    put(back, f"{anchor}/seal.json", seal_bytes)
+    if variant != "edited_status":
+        put(back, f"{anchor}/seal.sha256", (digest_bytes(seal_bytes) + "\n").encode())
+
+    restored, _ = restore_objects(
+        back,
+        target,
+        PREFIX,
+        result["backup_id"],
+        tmp_path,
+        budget=TransferBudget(20, 0),
+        allow_unlinked_drill=True,
+    )
+    if variant == "legacy_object_drill":
+        assert restored["status"] == "COMPLETE" and restored["restore_mode"] == "LOCAL_DRILL_OBJECTS_ONLY"
+    else:
+        assert restored["status"] == "FAILED" and target.head(key) is None

@@ -179,3 +179,5 @@ backend\.venv\Scripts\python.exe scripts\load_test_100.py # 100 并发压测（�
 ## 生产稳定性 Issue 008
 
 新增视频对象只读对账、带 SHA-256 和清单的对象备份，以及验证数据库引用的隔离恢复。使用与验收见[第四阶段实施报告](production-audit/phase-4/IMPLEMENTATION_REPORT.md)。
+
+Issue 008 收尾为恢复启用 HTTPS 门禁、补齐失效检查点报告并区分纯对象备份与数据库共同恢复点。见[收尾实施报告](production-audit/phase-4-final/IMPLEMENTATION_REPORT.md)。

@@ -4,9 +4,10 @@ import json
 import os
 import re
 import shutil
+from ipaddress import ip_address
 from itertools import zip_longest
-from random import Random
 from pathlib import Path
+from random import Random
 from tempfile import TemporaryDirectory
 from time import monotonic
 from urllib.parse import urlsplit
@@ -22,7 +23,8 @@ from worker.media_process import MediaError
 from worker.media_validation import validate_output
 from worker.object_backup_manifest import (
     MANIFEST_LIMIT,
-    SNAPSHOT_FILES,
+    SCHEMA_VERSION,
+    archive_ready,
     SNAPSHOT_ID,
     file_digest,
     manifest_rows,
@@ -135,10 +137,10 @@ def backup_objects(
         and source.client.meta.endpoint_url == backup.client.meta.endpoint_url
     ):
         raise ValueError("backup and source must use different locations")
-    info = database_snapshot(snapshot, confirmed, sessions)
+    info = database_snapshot(snapshot, confirmed, sessions) if backup is not None else None
     anchor = f"{prefix}/runs/{backup_id}"
     summary = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "backup_id": backup_id,
         "created_at": timestamp(),
         "object_snapshot_time": timestamp(),
@@ -148,7 +150,7 @@ def backup_objects(
         "destination_kind": "UNCONFIGURED" if backup is None else "LOCAL_DRILL" if local_drill else "OFFSITE",
         "destination_failure_domain": failure_domain if not local_drill else None,
         "status": "RUNNING" if backup else "OFFSITE_NOT_CONFIGURED",
-        "consistency_status": "INCONSISTENT",
+        "consistency_status": "INCONSISTENT" if backup else "NOT_APPLICABLE",
         "database_backup_id": snapshot.name if snapshot else None,
         "database_snapshot_time": None,
         "database_backup_hash": None,
@@ -177,6 +179,7 @@ def backup_objects(
                 budget.check()
                 summary["object_count"] += 1
                 row = {
+                    "schema_version": SCHEMA_VERSION,
                     "work_id": ref.work_id,
                     "task_no": ref.task_no,
                     "object_key": ref.key,
@@ -230,9 +233,12 @@ def backup_objects(
             store_verified(
                 backup, f"{anchor}/objects.jsonl", manifest, manifest_digest, budget, "application/jsonl"
             )
-            summary["status"] = "COMPLETE"
-            if archive_ready(summary):
-                summary["consistency_status"] = "CONSISTENT"
+            if info:
+                if not archive_ready(summary):
+                    raise ValueError("verified database archive is incomplete")
+                summary.update(status="COMPLETE", consistency_status="CONSISTENT")
+            else:
+                summary.update(status="OBJECTS_COMPLETE", consistency_status="OBJECTS_ONLY")
             summary["finished_at"] = timestamp()
             summary["elapsed_seconds"] = round(monotonic() - start, 3)
             pending = directory / "pending-seal.json"
@@ -247,6 +253,7 @@ def backup_objects(
             )
     except (
         OSError,
+        ValueError,
         StorageUnavailable,
         SQLAlchemyError,
         ObjectSizeMismatch,
@@ -260,16 +267,6 @@ def backup_objects(
     summary.setdefault("elapsed_seconds", round(monotonic() - start, 3))
     seal_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary, directory
-
-
-def archive_ready(seal):
-    archive = seal.get("database_archive")
-    return (
-        isinstance(archive, dict)
-        and set(archive) == set(SNAPSHOT_FILES)
-        and SNAPSHOT_ID.fullmatch(seal.get("database_backup_id") or "") is not None
-        and archive["database.sql.gz"]["sha256"] == seal.get("database_backup_hash")
-    )
 
 
 def _restore_rows(manifest, seal, batch_size, sessions, samples=0):
@@ -348,12 +345,15 @@ def restore_objects(
     allow_unlinked_drill=False,
     sessions=SyncSessionLocal,
 ):
+    settings = get_settings()
+    if settings.is_production:
+        raise ValueError("restore requires an isolated application/database configuration")
     budget = budget or TransferBudget(6 * 3600, 192 * 1024)
     if not PREFIX.fullmatch(prefix):
         raise ValueError("invalid backup key prefix")
     if backup.bucket == target.bucket:
         raise ValueError("restore target bucket must differ from backup bucket")
-    target_name = get_settings().MINIO_BUCKET_VIDEOS
+    target_name = settings.MINIO_BUCKET_VIDEOS
     if target.bucket == target_name:
         raise ValueError("restore target must differ from the configured application bucket")
     output.mkdir(parents=True, exist_ok=True)
@@ -363,6 +363,7 @@ def restore_objects(
     summary = {
         "backup_id": backup_id,
         "target_bucket": target.bucket,
+        "restore_mode": "LOCAL_DRILL" if allow_unlinked_drill else "ISOLATED_RESTORE",
         "started_at": timestamp(),
         "status": "FAILED",
         "restored_count": 0,
@@ -371,13 +372,21 @@ def restore_objects(
     }
     try:
         with TemporaryDirectory(dir=ird) as temporary:
-            seal, manifest, _ = verify_seal(backup, prefix, backup_id, Path(temporary), budget)
+            seal, manifest, anchor = verify_seal(
+                backup,
+                prefix,
+                backup_id,
+                Path(temporary),
+                budget,
+                local_drill=allow_unlinked_drill,
+                allow_objects_only=allow_unlinked_drill,
+            )
             if seal["source_bucket"] == target.bucket:
                 raise ValueError("cannot restore into the original bucket")
-            if seal["consistency_status"] == "CONSISTENT" and not archive_ready(seal):
-                raise ValueError("consistent recovery point lacks its database archive description")
-            if seal["consistency_status"] != "CONSISTENT" and not allow_unlinked_drill:
-                raise ValueError("object-only backup needs explicit isolated drill mode")
+            if seal["consistency_status"] == "CONSISTENT":
+                verify_database_archive(backup, seal, anchor, budget)
+            else:
+                summary["restore_mode"] = "LOCAL_DRILL_OBJECTS_ONLY"
             if active_count(sessions):
                 raise ValueError("target database contains active Works")
             selected = _restore_rows(manifest, seal, batch_size, sessions, samples=samples)
@@ -417,24 +426,31 @@ def restore_objects(
     return summary, report_path
 
 
-def fetch_database(backup, prefix, backup_id, destination, budget):
+def verify_database_archive(backup, seal, anchor, budget, *, destination=None):
+    for name, entry in seal["database_archive"].items():
+        expected = ObjectDigest(entry["size"], entry["sha256"])
+        key = f"{anchor}/database/{name}"
+        if destination is None:
+            actual = read_object(backup, key, expected.size, budget)
+        else:
+            reserve_disk(destination, expected.size)
+            with (destination / name).open("xb") as output:
+                actual = read_object(backup, key, expected.size, budget, output=output)
+        if actual != expected:
+            raise ObjectConflict("database_archive_sha256_mismatch")
+
+
+def fetch_database(backup, prefix, backup_id, destination, budget, *, local_drill=False):
     if not PREFIX.fullmatch(prefix):
         raise ValueError("invalid backup key prefix")
     destination.mkdir(mode=0o700, parents=False, exist_ok=False)
     with TemporaryDirectory(dir=destination) as temporary:
-        seal, _, anchor = verify_seal(backup, prefix, backup_id, Path(temporary), budget)
-        if seal["consistency_status"] != "CONSISTENT" or not archive_ready(seal):
-            raise ValueError("backup lacks a verified linked MySQL archive")
+        seal, _, anchor = verify_seal(
+            backup, prefix, backup_id, Path(temporary), budget, local_drill=local_drill
+        )
         directory = destination / seal["database_backup_id"]
         directory.mkdir(mode=0o700)
-        for name, expected in seal["database_archive"].items():
-            reserve_disk(directory, expected["size"])
-            with (directory / name).open("xb") as output:
-                actual = read_object(
-                    backup, f"{anchor}/database/{name}", expected["size"], budget, output=output
-                )
-            if actual.sha256 != expected["sha256"]:
-                raise ObjectConflict("database_archive_sha256_mismatch")
+        verify_database_archive(backup, seal, anchor, budget, destination=directory)
         snapshot_info(directory)
         return directory
 
@@ -448,18 +464,36 @@ def configured_store(role, *, allow_local):
     if not all((endpoint, bucket, access, secret)):
         raise ValueError("incomplete S3 configuration")
     parsed = urlsplit(endpoint)
+    _ = parsed.port
     if (
         parsed.scheme not in ({"http", "https"} if allow_local else {"https"})
         or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or "?" in endpoint
+        or "#" in endpoint
+        or any(char.isspace() for char in endpoint)
+        or "\\" in endpoint
         or parsed.path not in {"", "/"}
     ):
         raise ValueError("invalid S3 endpoint or missing TLS")
-    if not allow_local and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
-        raise ValueError("loopback cannot be labeled offsite")
+    if not allow_local:
+        hostname = parsed.hostname.rstrip(".")
+        try:
+            address = ip_address(hostname)
+        except ValueError:
+            address = None
+        if (
+            hostname == "localhost"
+            or hostname.endswith(".localhost")
+            or address is not None
+            and (
+                address.is_loopback
+                or getattr(address, "ipv4_mapped", None) is not None
+                and address.ipv4_mapped.is_loopback
+            )
+        ):
+            raise ValueError("loopback cannot be labeled offsite")
     return ObjectStore(
         bucket, new_s3_client(endpoint, os.getenv(prefix + "REGION", "us-east-1"), access, secret)
     )
@@ -519,14 +553,20 @@ def main():
             print("OFFSITE_NOT_CONFIGURED")
             return 3
         elif args.operation == "fetch-database":
-            print(fetch_database(backup, args.prefix, args.backup_id, args.destination, budget))
+            archive = fetch_database(
+                backup, args.prefix, args.backup_id, args.destination, budget, local_drill=args.local_drill
+            )
+            if args.local_drill:
+                print(json.dumps({"restore_mode": "LOCAL_DRILL", "archive": str(archive)}))
+            else:
+                print(archive)
             return 0
         else:
-            target = configured_store("RESTORE", allow_local=True)
+            if settings.is_production:
+                raise ValueError("restore requires an isolated application/database configuration")
+            target = configured_store("RESTORE", allow_local=args.local_drill)
             if target is None:
                 raise ValueError("configure a dedicated restore S3 target")
-            if get_settings().is_production:
-                raise ValueError("restore requires an isolated application/database configuration")
             summary, report = restore_objects(
                 backup,
                 target,
@@ -543,7 +583,7 @@ def main():
         print(json.dumps({"status": "FAILED", "error": safe_error(error)}))
         return 2
     print(json.dumps({**summary, "report": str(report)}, ensure_ascii=False))
-    return 0 if summary["status"] == "COMPLETE" else 2 if summary["status"] != "OFFSITE_NOT_CONFIGURED" else 3
+    return {"COMPLETE": 0, "OFFSITE_NOT_CONFIGURED": 3, "OBJECTS_COMPLETE": 4}.get(summary["status"], 2)
 
 
 if __name__ == "__main__":

@@ -23,3 +23,7 @@ python -m worker.object_reconciliation --mode full --batch-size 100 --max-concur
 
 
 建议在运维定时任务里分开配置快速和完整扫描。快速扫描可每日运行，完整扫描放在非考试窗口。计划任务保留每段退出码和报告；负载预算由按机器资源和竞态实测再调整。游标内的 ContinuationToken 绑定同一 Bucket。S3 拒绝旧 token 或内容大量改动时，重新执行全扫描。Work 引用使用现有表索引和按页查询，大库存的 Key 反查成本需测量。
+
+## 失效检查点
+
+终止任务残留的检查点且未成为对应成功作品时，输出 `STALE_CHECKPOINT` 和计数 `stale_checkpoint_count`。活动 Work 即使租约过期仍受保护。详见[收尾对账分类](../phase-4-final/RECONCILIATION_CLASSIFICATION.md)。

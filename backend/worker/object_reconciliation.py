@@ -19,8 +19,7 @@ from app.core.config import get_settings
 from app.core.database import SyncSessionLocal
 from app.core.object_integrity import ObjectSizeMismatch
 from app.core.storage import ObjectStore, StorageUnavailable
-from app.services.execution_lease import ACTIVE_WORK
-from worker.object_inventory import GENERATED, object_claims, successful_page, work_links
+from worker.object_inventory import generated_owner, object_claims, successful_page, work_links
 from worker.object_transfer import TransferBudget, read_object
 
 FIELDS = (
@@ -34,6 +33,10 @@ FIELDS = (
     "classification",
     "detected_at",
     "finished_at",
+    "lease_generation",
+    "lease_expires_at",
+    "recover_after",
+    "work_status",
     "error_reason",
 )
 ANOMALIES = {
@@ -41,6 +44,7 @@ ANOMALIES = {
     "SIZE_MISMATCH",
     "CHECKSUM_MISMATCH",
     "ORPHAN_OBJECT",
+    "STALE_CHECKPOINT",
     "REFERENCE_CONFLICT",
 }
 COUNTERS = {
@@ -50,6 +54,7 @@ COUNTERS = {
     "CHECKSUM_MISMATCH": "checksum_mismatch_count",
     "ORPHAN_OBJECT": "orphan_count",
     "ACTIVE_CHECKPOINT": "active_checkpoint_count",
+    "STALE_CHECKPOINT": "stale_checkpoint_count",
     "LEGACY_UNVERIFIED": "legacy_unverified_count",
     "STORAGE_UNAVAILABLE": "storage_error_count",
     "DATABASE_UNAVAILABLE": "database_error_count",
@@ -64,18 +69,26 @@ def utc() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def finding(status, *, ref=None, key=None, size=None, digest=None, reason=None, work_id=None):
+def _iso(value):
+    return value.replace(tzinfo=UTC).isoformat() if value else None
+
+
+def finding(status, *, ref=None, key=None, size=None, digest=None, reason=None, work_id=None, claim=None):
     return {
-        "work_id": ref.work_id if ref else work_id,
-        "task_no": ref.task_no if ref else None,
+        "work_id": ref.work_id if ref else claim.work_id if claim else work_id,
+        "task_no": ref.task_no if ref else claim.task_no if claim else None,
         "object_key": ref.key if ref else key,
-        "expected_size": ref.size if ref else None,
+        "expected_size": ref.size if ref else claim.expected_size if claim else None,
         "actual_size": size,
-        "expected_sha256": ref.digest if ref else None,
+        "expected_sha256": ref.digest if ref else claim.expected_sha256 if claim else None,
         "actual_sha256": digest,
         "classification": status,
         "detected_at": utc(),
-        "finished_at": ref.finished_at.replace(tzinfo=UTC).isoformat() if ref and ref.finished_at else None,
+        "finished_at": _iso(ref.finished_at) if ref else None,
+        "lease_generation": claim.lease_generation if claim else None,
+        "lease_expires_at": _iso(claim.lease_expires_at) if claim else None,
+        "recover_after": _iso(claim.recover_after) if claim else None,
+        "work_status": claim.work_status if claim else "succeeded" if ref else None,
         "error_reason": reason,
     }
 
@@ -83,7 +96,13 @@ def finding(status, *, ref=None, key=None, size=None, digest=None, reason=None, 
 def check_reference(ref, *, store, budget, full, links):
     if not ref.key:
         return finding("MISSING_OBJECT", ref=ref, reason="missing_video_key")
-    if ref.checkpoint_conflict or len(links.get(ref.key, ())) > 1:
+    inferred = generated_owner(ref.key)
+    if (
+        ref.checkpoint_conflict
+        or len(links.get(ref.key, ())) > 1
+        or inferred is not None
+        and inferred != ref.work_id
+    ):
         return finding("REFERENCE_CONFLICT", ref=ref, reason="checkpoint_or_multiple_work_conflict")
     actual_size = None
     try:
@@ -116,14 +135,32 @@ def scan_object_page(objects, grace_days, sessions):
     cutoff = datetime.now(UTC) - timedelta(days=grace_days)
     for item in objects:
         known = claims.get(item.key, ())
-        match = GENERATED.fullmatch(item.key)
-        inferred = int(match[1]) if match and len(match[1]) <= 19 else None
-        if any(active for _, active, _, _ in known) or owners.get(inferred) in ACTIVE_WORK:
-            owner = next((work_id for work_id, active, _, _ in known if active), inferred)
-            yield finding("ACTIVE_CHECKPOINT", key=item.key, size=item.size, work_id=owner)
-        elif item.key in links:
+        inferred = generated_owner(item.key)
+        linked = links.get(item.key, set())
+        claim = known[0] if len(known) == 1 else None
+        if len(linked | {item_claim.work_id for item_claim in known}) > 1 or (
+            inferred is not None and linked and inferred not in linked
+        ):
+            yield finding(
+                "REFERENCE_CONFLICT",
+                key=item.key,
+                size=item.size,
+                claim=claim,
+                reason="multiple_work_or_generated_owner_conflict",
+            )
+        elif any(item_claim.active for item_claim in known) or inferred in owners:
+            yield finding("ACTIVE_CHECKPOINT", key=item.key, size=item.size, work_id=inferred, claim=claim)
+        elif claim and not (claim.work_status == "succeeded" and claim.video_key == item.key):
+            yield finding(
+                "STALE_CHECKPOINT",
+                key=item.key,
+                size=item.size,
+                claim=claim,
+                reason="inactive_checkpoint_without_matching_success",
+            )
+        elif linked:
             continue
-        elif item.key.startswith("videos/mock/") or not match:
+        elif inferred is None:
             yield finding("UNCLASSIFIED_OBJECT", key=item.key, size=item.size, reason="mock_or_unknown_key")
         elif item.modified >= cutoff:
             yield finding("GRACE_PERIOD", key=item.key, size=item.size)
