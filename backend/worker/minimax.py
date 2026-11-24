@@ -1,5 +1,6 @@
 """MiniMax H3 V2 requests and stable worker errors."""
 
+import re
 from collections.abc import Mapping
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit
@@ -18,10 +19,18 @@ MESSAGES = {
 
 
 class GenerationError(Exception):
-    def __init__(self, code: str = "UPSTREAM_ERROR", retry: RetryMode | None = None):
+    def __init__(
+        self, code: str = "UPSTREAM_ERROR", retry: RetryMode | None = None, *, uncertain: bool = False
+    ):
         super().__init__(code)
         self.code = code
         self.retry = retry
+        self.uncertain = uncertain
+        self.timed_out = False
+
+
+def valid_task_id(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is not None
 
 
 class MiniMax:
@@ -36,27 +45,34 @@ class MiniMax:
             response = self.client.request(
                 method, f"{self.base_url}{path}", headers=self.headers, timeout=timeout, **kwargs
             )
-        except (httpx.ConnectTimeout, httpx.ConnectError):
-            raise GenerationError(retry="resubmit" if creating else "resume") from None
-        except httpx.RequestError:
-            # After an interrupted POST the provider may already have created a paid task.
-            raise GenerationError(retry=None if creating else "resume") from None
+        except (httpx.ConnectTimeout, httpx.ConnectError) as error:
+            failure = GenerationError(retry="resubmit" if creating else "resume")
+            failure.timed_out = isinstance(error, httpx.ConnectTimeout)
+            raise failure from None
+        except httpx.RequestError as error:
+            failure = GenerationError(retry=None if creating else "resume", uncertain=creating)
+            if isinstance(error, httpx.TimeoutException):
+                failure.timed_out = True
+            raise failure from None
 
-        if response.is_error:
-            if response.status_code == 422:
-                raise GenerationError("MODERATION_REJECTED")
-            if response.status_code in {429, 529}:
-                raise GenerationError(retry="resubmit" if creating else "resume")
-            if not creating and response.status_code >= 500:
+        status = response.status_code
+        if not 200 <= status < 300:
+            if not creating:
                 raise GenerationError(retry="resume")
-            raise GenerationError()
+            if status == 422:
+                raise GenerationError("MODERATION_REJECTED")
+            if status == 429:
+                raise GenerationError(retry="resubmit")
+            if status in {400, 401, 402, 403}:
+                raise GenerationError()
+            raise GenerationError(uncertain=True)
 
         try:
             payload = response.json()
         except ValueError:
-            raise GenerationError(retry=None if creating else "resume") from None
+            raise GenerationError(retry=None if creating else "resume", uncertain=creating) from None
         if not isinstance(payload, dict):
-            raise GenerationError()
+            raise GenerationError(retry=None if creating else "resume", uncertain=creating)
         return payload
 
     def create(
@@ -79,14 +95,14 @@ class MiniMax:
             },
         )
         task_id = payload.get("task_id")
-        if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
-            raise GenerationError()
+        if not valid_task_id(task_id):
+            raise GenerationError(uncertain=True)
         return task_id
 
     def query(self, task_id: str, timeout: float) -> dict:
         payload = self._request("GET", f"/v2/query/video_generation/{quote(task_id, safe='')}", timeout)
         task = payload.get("task", payload)
-        if not isinstance(task, dict):
+        if not isinstance(task, dict) or ("id" in task and task["id"] != task_id):
             raise GenerationError(retry="resume")
         return task
 

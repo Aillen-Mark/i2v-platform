@@ -84,17 +84,11 @@ def receive_delivery(work_id: int) -> bool:
         return result.rowcount == 1
 
 
-def delayed_delivery_count(age: timedelta) -> int:
+def delivery_backlog() -> tuple[int, int]:
     with SyncSessionLocal() as session:
-        return int(
-            session.scalar(
-                select(func.count())
-                .select_from(GenerationOutbox)
-                .where(
-                    GenerationOutbox.received_at.is_(None),
-                    GenerationOutbox.created_at <= utcnow() - age,
-                    _active_work(),
-                )
+        count, oldest = session.execute(
+            select(func.count(), func.min(GenerationOutbox.created_at)).where(
+                GenerationOutbox.received_at.is_(None), _active_work()
             )
-            or 0
-        )
+        ).one()
+    return count, max(0, int((utcnow() - oldest).total_seconds())) if oldest else 0

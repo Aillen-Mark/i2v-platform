@@ -1,23 +1,26 @@
 """Worker-side SQL and Redis state."""
 
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from time import time
-from typing import TypedDict
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from redis.exceptions import RedisError
+from sqlalchemy import or_, select
 
 from app.core.database import SyncSessionLocal
 from app.core.timeutil import utcnow
-from app.models import Candidate, Engine, GenerationOutbox, Work
+from app.models import Engine, GenerationAttempt, GenerationExecution, GenerationOutbox, Work
+from app.services.execution_lease import ACTIVE_WORK, ExecutionStopped
 from app.services.handoff_sync import sync_redis
+from worker.config import worker_settings
+
+logger = logging.getLogger(__name__)
 
 TASK_SECONDS = 600
-LEASE_SECONDS = TASK_SECONDS + 90
-QUEUE_SECONDS = 7200
-ACTIVE_STATUSES = ("queued", "running")
+REDIS_CLAIM_SECONDS = 10
 GLOBAL_SLOTS = "i2v:worker:slots"
 
 ACQUIRE_SLOTS = """
@@ -30,6 +33,17 @@ for i = 1, 2 do
 end
 for i = 1, 2 do
     redis.call('ZADD', KEYS[i], ARGV[2], ARGV[3])
+end
+return 1
+"""
+
+RENEW_SLOTS = """
+for i = 1, 2 do
+    local expiry = redis.call('ZSCORE', KEYS[i], ARGV[1])
+    if not expiry or tonumber(expiry) <= tonumber(ARGV[2]) then return 0 end
+end
+for i = 1, 2 do
+    redis.call('ZADD', KEYS[i], ARGV[3], ARGV[1])
 end
 return 1
 """
@@ -73,78 +87,61 @@ redis.call('HSET', KEYS[1],
 @dataclass
 class Job:
     work: Work
-    account: str
     engine: Engine | None
 
 
 def load_job(work_id: int) -> Job | None:
     with SyncSessionLocal() as session:
         row = session.execute(
-            select(Work, Candidate.account, Engine)
-            .join(Candidate, Candidate.id == Work.candidate_id)
+            select(Work, Engine)
             .outerjoin(Engine, Engine.code == Work.engine_code)
-            .where(Work.id == work_id, Work.task_status.in_(ACTIVE_STATUSES))
+            .where(Work.id == work_id, Work.task_status.in_(ACTIVE_WORK))
         ).one_or_none()
     return Job(*row) if row is not None else None
 
 
-class WorkProgress(TypedDict, total=False):
-    upstream_task_id: str | None
-    retry_count: int
-    task_status: str
-
-
-def save_progress(job: Job, upstream_task_id: str | None, retry_count: int) -> bool:
-    work = job.work
-    updates: WorkProgress = {"upstream_task_id": upstream_task_id, "retry_count": retry_count}
-    if upstream_task_id:
-        updates["task_status"] = "running"
-    with SyncSessionLocal.begin() as session:
-        result = session.execute(
-            update(Work).where(Work.id == work.id, Work.task_status.in_(ACTIVE_STATUSES)).values(**updates)
-        )
-        if result.rowcount != 1:
-            return False
-    for key, value in updates.items():
-        setattr(work, key, value)
-    return True
-
-
 def stale_work_ids() -> list[int]:
+    """Find received or legacy work eligible for a durable recovery claim."""
     now = utcnow()
+    attempt_status = (
+        select(GenerationAttempt.status)
+        .where(GenerationAttempt.work_id == Work.id)
+        .order_by(GenerationAttempt.attempt_no.desc())
+        .limit(1)
+        .correlate(Work)
+        .scalar_subquery()
+    )
     with SyncSessionLocal() as session:
         return list(
             session.scalars(
                 select(Work.id)
                 .outerjoin(GenerationOutbox, GenerationOutbox.work_id == Work.id)
+                .outerjoin(GenerationExecution, GenerationExecution.work_id == Work.id)
                 .where(
+                    Work.task_status.in_(ACTIVE_WORK),
+                    or_(GenerationOutbox.work_id.is_(None), GenerationOutbox.received_at.is_not(None)),
                     or_(
-                        (Work.task_status == "queued")
-                        & (Work.submitted_at < now - timedelta(seconds=QUEUE_SECONDS))
-                        & or_(GenerationOutbox.work_id.is_(None), GenerationOutbox.received_at.is_not(None)),
-                        (Work.task_status == "running")
-                        & (Work.updated_at < now - timedelta(seconds=LEASE_SECONDS)),
-                    )
+                        attempt_status.is_(None),
+                        attempt_status.not_in(("submission_unknown", "manual_review")),
+                    ),
+                    or_(
+                        (GenerationExecution.work_id.is_(None))
+                        & (Work.updated_at <= now - timedelta(seconds=120)),
+                        (GenerationExecution.recover_after <= now)
+                        & or_(
+                            GenerationExecution.lease_expires_at.is_(None),
+                            GenerationExecution.lease_expires_at <= now,
+                        ),
+                    ),
                 )
-                .order_by(Work.id)
+                .order_by(GenerationExecution.recover_after, Work.id)
                 .limit(100)
             )
         )
 
 
 def work_lock(work_id: int):
-    return sync_redis.lock(f"i2v:worker:work:{work_id}", timeout=LEASE_SECONDS, blocking=False)
-
-
-def generation_start(work_id: int) -> float:
-    key = f"i2v:worker:started:{work_id}"
-    now = time()
-    old_start = sync_redis.set(key, str(now), nx=True, ex=86400)
-    return now if old_start else float(sync_redis.get(key) or now)
-
-
-def submission_key(work_id: int, attempt: int) -> str:
-    return f"i2v:worker:submission:{work_id}:{attempt}"
+    return sync_redis.lock(f"i2v:worker:work:{work_id}", timeout=REDIS_CLAIM_SECONDS, blocking=False)
 
 
 @contextmanager
@@ -152,23 +149,33 @@ def generation_slot(engine_code: str, engine_limit: int, account_limit: int):
     engine_slots = f"{GLOBAL_SLOTS}:{engine_code}"
     token = uuid4().hex
     now = time()
+    duration = worker_settings().I2V_LEASE_SECONDS
     acquired = sync_redis.eval(
         ACQUIRE_SLOTS,
         2,
         GLOBAL_SLOTS,
         engine_slots,
         now,
-        now + LEASE_SECONDS,
+        now + duration,
         token,
         account_limit,
         engine_limit,
     )
+
+    def refresh():
+        now = time()
+        if not sync_redis.eval(RENEW_SLOTS, 2, GLOBAL_SLOTS, engine_slots, token, now, now + duration):
+            raise ExecutionStopped("Generation concurrency slot expired")
+
     try:
-        yield bool(acquired)
+        yield refresh if acquired else None
     finally:
         if acquired:
-            with sync_redis.pipeline() as pipe:
-                pipe.zrem(GLOBAL_SLOTS, token).zrem(engine_slots, token).execute()
+            try:
+                with sync_redis.pipeline() as pipe:
+                    pipe.zrem(GLOBAL_SLOTS, token).zrem(engine_slots, token).execute()
+            except RedisError:
+                logger.warning("Generation slot release failed engine=%s", engine_code)
 
 
 def circuit_key(engine_code: str) -> str:

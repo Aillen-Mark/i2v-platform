@@ -5,6 +5,8 @@ from app.models.audit_log import AuditLog
 from app.models.base import Base, BigIntUnsigned, CreatedUpdatedMixin, TinyInt, UpdatedOnlyMixin
 from app.models.candidate import Candidate
 from app.models.engine import Engine
+from app.models.generation_attempt import GenerationAttempt
+from app.models.generation_execution import GenerationExecution
 from app.models.generation_outbox import GenerationOutbox
 from app.models.question import Question
 from app.models.quota import Quota
@@ -26,6 +28,8 @@ __all__ = [
     "Candidate",
     "CreatedUpdatedMixin",
     "Engine",
+    "GenerationAttempt",
+    "GenerationExecution",
     "GenerationOutbox",
     "Question",
     "Quota",

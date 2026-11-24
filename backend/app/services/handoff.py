@@ -25,7 +25,7 @@ from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
 from app.core.redis import redis_client
 from app.core.security import utcnow
-from app.models import AuditLog, Quota, Work
+from app.models import AuditLog, GenerationAttempt, GenerationExecution, Quota, Work
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +189,9 @@ async def mark_work_succeeded(
                 logger.info("成功回调：作品 %s 当前状态 %s，幂等忽略", work_id, work.task_status)
                 return
 
+            if await session.get(GenerationExecution, work_id) is not None:
+                logger.warning("Unfenced success ignored for durable work_id=%s", work_id)
+                return
             work.task_status = "succeeded"
             work.video_key = video_key
             work.file_size = file_size
@@ -228,6 +231,11 @@ async def mark_work_failed_and_refund(
                 )
                 return
 
+            if await session.get(GenerationExecution, work_id) is not None or await session.scalar(
+                select(GenerationAttempt.id).where(GenerationAttempt.work_id == work_id).limit(1)
+            ) is not None:
+                logger.warning("Unfenced refund ignored for durable work_id=%s", work_id)
+                return
             before_val = {
                 "task_status": work.task_status,
                 "quota_refunded": work.quota_refunded,

@@ -2,7 +2,6 @@
 
 import logging
 import signal
-from datetime import timedelta
 from threading import Event
 from time import monotonic, time
 
@@ -11,7 +10,7 @@ from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings
-from app.services.generation_outbox import claim_delivery, delayed_delivery_count, finish_delivery
+from app.services.generation_outbox import claim_delivery, delivery_backlog, finish_delivery
 from app.services.handoff_sync import QUEUE_KEY, sync_redis
 from worker.tasks import enqueue_video_generation
 
@@ -53,11 +52,13 @@ def main() -> None:
     while not stop.is_set():
         try:
             if monotonic() >= next_check:
-                delayed = delayed_delivery_count(timedelta(minutes=5))
-                if delayed:
-                    logger.warning(
-                        "Generation outbox has %s unreceived works older than five minutes", delayed
-                    )
+                pending, oldest = delivery_backlog()
+                logger.log(
+                    logging.WARNING if oldest >= 300 else logging.INFO,
+                    "generation_outbox_backlog pending=%s oldest_seconds=%s",
+                    pending,
+                    oldest,
+                )
                 next_check = monotonic() + 60
             if not dispatch_once():
                 stop.wait(1)

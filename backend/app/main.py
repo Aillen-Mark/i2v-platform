@@ -30,7 +30,7 @@ from app.core.errors import register_exception_handlers
 from app.core.redis import check_redis, close_redis
 from app.core.security import hash_password
 from app.core.storage import ensure_buckets
-from app.models import Admin, GenerationOutbox
+from app.models import Admin, GenerationAttempt, GenerationExecution, GenerationOutbox
 from app.services.hashing import shutdown_pool as shutdown_hash_pool
 from app.services.hashing import warmup as warmup_hash_pool
 
@@ -110,7 +110,8 @@ async def lifespan(app: FastAPI):
         )
     if not settings.MOCK_WORKER:
         async with AsyncSessionLocal() as session:
-            await session.execute(select(GenerationOutbox.work_id).limit(1))
+            for column in (GenerationOutbox.work_id, GenerationAttempt.id, GenerationExecution.work_id):
+                await session.execute(select(column).limit(1))
     if not await _wait_service(check_redis, "Redis"):
         raise RuntimeError(
             "Redis 连接失败：请确认 Docker Desktop 已启动、"

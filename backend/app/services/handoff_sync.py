@@ -26,7 +26,8 @@ from sqlalchemy import func, select, update
 from app.core.config import get_settings
 from app.core.database import SyncSessionLocal
 from app.core.timeutil import utcnow
-from app.models import AuditLog, Quota, Work
+from app.models import AuditLog, GenerationAttempt, Quota, Work
+from app.services.execution_lease import ExecutionLease, ExecutionStopped, check_lease
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,16 @@ def _remove_from_wait_queue(work_id: int) -> None:
         logger.warning("清理作品排队标记失败 work_id=%s", work_id)
 
 
+def _current_attempt(session, work_id: int) -> GenerationAttempt | None:
+    return session.scalar(
+        select(GenerationAttempt)
+        .where(GenerationAttempt.work_id == work_id)
+        .order_by(GenerationAttempt.attempt_no.desc())
+        .limit(1)
+        .with_for_update()
+    )
+
+
 def mark_work_succeeded(
     work_id: int,
     video_key: str,
@@ -172,6 +183,8 @@ def mark_work_succeeded(
     duration_sec: int,
     cost_seconds: int,
     upstream_task_id: str,
+    *,
+    lease: ExecutionLease | None = None,
 ) -> None:
     """契约 B：成功回调（幂等，仅 queued/running 可转 succeeded）。"""
 
@@ -185,6 +198,22 @@ def mark_work_succeeded(
                 logger.info("成功回调：作品 %s 当前状态 %s，幂等忽略", work_id, work.task_status)
                 return
 
+            execution = check_lease(session, work, lease)
+            if execution is not None:
+                attempt = _current_attempt(session, work_id)
+                if (
+                    attempt is None
+                    or attempt.status != "uploading"
+                    or attempt.provider_task_id != upstream_task_id
+                    or execution.artifact_key != video_key
+                    or execution.artifact_size != file_size
+                ):
+                    raise ExecutionStopped(work_id)
+                attempt.status = "succeeded"
+                attempt.error_code = None
+                attempt.updated_at = utcnow()
+                execution.lease_owner = None
+                execution.lease_expires_at = None
             work.task_status = "succeeded"
             work.video_key = video_key
             work.file_size = file_size
@@ -204,6 +233,8 @@ def mark_work_failed_and_refund(
     error_code: str,
     readable_error_msg: str,
     retry_count: int = 1,
+    *,
+    lease: ExecutionLease | None = None,
 ) -> None:
     """契约 C：失败退还（幂等，重复调用只退一次）。"""
 
@@ -222,6 +253,16 @@ def mark_work_failed_and_refund(
                 )
                 return
 
+            execution = check_lease(session, work, lease)
+            attempt = _current_attempt(session, work_id)
+            if (attempt is not None and attempt.status not in ("failed", "cancelled")) or (
+                execution is not None and attempt is None
+            ):
+                logger.warning("Refund withheld for unsettled upstream work_id=%s", work_id)
+                return
+            if execution is not None:
+                execution.lease_owner = None
+                execution.lease_expires_at = None
             before_val: dict[str, Any] = {
                 "task_status": work.task_status,
                 "quota_refunded": work.quota_refunded,

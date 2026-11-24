@@ -5,14 +5,16 @@ from random import uniform
 from shutil import which
 
 from celery import Celery, signals
+from kombu.exceptions import OperationalError
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings, is_https_endpoint
 from app.core.database import sync_engine
-from app.services.generation_outbox import receive_delivery
 from worker.config import worker_settings
-from worker.pipeline import generate, queue_expired
+from worker.execution import acquire, maintain, reserve_recovery
+from worker.generation_reconciler import log_recovery_backlog, review_due_submissions
+from worker.pipeline import generate
 from worker.state import (
     TASK_SECONDS,
     circuit_is_open,
@@ -23,6 +25,7 @@ from worker.state import (
 )
 
 QUEUE = "i2v_generate"
+RECOVERY_QUEUE = "i2v_recovery"
 celery_app = Celery("i2v", broker=get_settings().redis_url)
 celery_app.conf.update(
     task_default_queue=QUEUE,
@@ -36,7 +39,11 @@ celery_app.conf.update(
     broker_connection_timeout=5,
     broker_transport_options={"visibility_timeout": 3600, "socket_connect_timeout": 5, "socket_timeout": 5},
     beat_schedule={
-        "reconcile-video-works": {"task": "i2v.reconcile_stale", "schedule": 60.0},
+        "reconcile-video-works": {
+            "task": "i2v.reconcile_stale",
+            "schedule": 60.0,
+            "options": {"queue": RECOVERY_QUEUE},
+        },
     },
 )
 
@@ -60,7 +67,7 @@ def reset_database_pool(**_kwargs) -> None:
     sync_engine.dispose(close=False)
 
 
-@celery_app.task(bind=True, name="i2v.generate_video", max_retries=None)
+@celery_app.task(bind=True, name="i2v.generate_video", max_retries=3)
 def enqueue_video_generation(
     self,
     work_id: int,
@@ -76,30 +83,42 @@ def enqueue_video_generation(
     try:
         lock = work_lock(work_id)
         if not lock.acquire():
-            raise self.retry(countdown=30 + uniform(0, 5))
+            logger.info("duplicate_delivery_redis_lock work_id=%s", work_id)
+            return
         try:
             job = load_job(work_id)
             if job is None:
                 return
             code = job.work.engine_code or engine_code
-            expired = not from_outbox and queue_expired(job)
-            if not job.work.upstream_task_id and not expired and circuit_is_open(code):
+            if not job.work.upstream_task_id and circuit_is_open(code):
                 raise self.retry(countdown=20 + uniform(0, 10))
             limit = max(1, job.engine.max_concurrency) if job.engine is not None else 1
-            with generation_slot(code, limit, worker_settings().I2V_ACCOUNT_CONCURRENCY) as acquired:
-                if not acquired:
-                    raise self.retry(countdown=3 + uniform(0, 3))
-                if from_outbox and not receive_delivery(work_id) and not job.work.upstream_task_id:
-                    return
-                generate(job, duration, job.work.aspect_ratio or aspect_ratio, expire_queued=not from_outbox)
         finally:
-            lock.release()
+            try:
+                lock.release()
+            except RedisError:
+                logger.warning("redis_lock_release_failed work_id=%s", work_id)
+        with generation_slot(code, limit, worker_settings().I2V_ACCOUNT_CONCURRENCY) as slot:
+            if not slot:
+                raise self.retry(countdown=3 + uniform(0, 3))
+            lease = acquire(work_id, from_outbox=from_outbox, max_seconds=TASK_SECONDS + 15)
+            if lease is None:
+                return
+            with maintain(lease, refresh_slot=slot) as lost:
+                generate(job, duration, job.work.aspect_ratio or aspect_ratio, lease=lease, lost=lost)
     except (RedisError, SQLAlchemyError):
         logger.warning("Worker dependency unavailable for work_id=%s", work_id)
         raise self.retry(countdown=15 + uniform(0, 5)) from None
 
 
-@celery_app.task(name="i2v.reconcile_stale")
+@celery_app.task(name="i2v.reconcile_stale", queue=RECOVERY_QUEUE, expires=60)
 def reconcile_stale() -> None:
+    review_due_submissions()
+    log_recovery_backlog()
     for work_id in stale_work_ids():
-        enqueue_video_generation.delay(work_id=work_id, image_url="", prompt="", engine_code="")
+        if reserve_recovery(work_id):
+            try:
+                enqueue_video_generation.apply_async(kwargs={"work_id": work_id}, retry=False)
+                logger.info("execution_recovery_published work_id=%s", work_id)
+            except (OperationalError, RedisError):
+                logger.warning("execution_recovery_publish_failed work_id=%s", work_id)

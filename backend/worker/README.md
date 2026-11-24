@@ -1,51 +1,46 @@
 # 图生视频 Worker
 
-Worker 从现有 FastAPI 交接入口接收任务，使用 MiniMax H3 V2 生成视频，将 H.264 + AAC MP4 上传到私有桶，再调用业务端的成功或退额回调。它从对象存储读取首帧，按考生所选画幅居中裁剪并内联发送给 H3。H3 首帧模式根据实际图片决定画幅。
+Worker 从 MySQL 读取已提交的作品，用 MiniMax H3 V2 生成视频，将 H.264 + AAC MP4 保存到私有桶，并在业务事务中写入成功或退额结果。Worker 从对象存储读取首帧，按考生所选画幅裁剪后内联发送给 MiniMax。
 
-## 联调启动
+## 联调与运行
 
-FastAPI 和 Worker 使用同一个仓库根目录的 `.env`，并连接同一套 MySQL、Redis 和对象存储。安装依赖时使用 FastAPI 的 Python 环境。
+FastAPI、Worker、Beat 和 Dispatcher 使用同一套 MySQL、Redis、对象存储和仓库根目录的 `.env`。使用 FastAPI 的 Python 环境安装 Worker 依赖。
 
 ```bash
 python -m pip install -r backend/worker/requirements.txt
 ```
 
-在根目录的本地 `.env` 中，保留现有连接配置并设置以下变量。将 MiniMax API Key 写入本地环境变量或此文件。
+真实生成需设置 `MOCK_WORKER=false`、`MINIMAX_API_KEY`、`MINIMAX_BASE_URL`（默认 `https://api.minimax.cn`），以及 `CELERY_TASK_MODULE=worker.tasks`、`CELERY_TASK_FUNC=enqueue_video_generation`。通过本地环境变量或未纳入版本控制的 `.env` 提供密钥。Linux 或 WSL 需安装带 libx264 和 AAC 的 FFmpeg。若 FFmpeg 不在 PATH，设置 `I2V_FFMPEG`。
 
-```dotenv
-MOCK_WORKER=false
-CELERY_TASK_MODULE=worker.tasks
-CELERY_TASK_FUNC=enqueue_video_generation
-MINIMAX_API_KEY=
-MINIMAX_BASE_URL=https://api.minimax.cn
-I2V_ACCOUNT_CONCURRENCY=30
-```
-
-Linux 或 WSL 中安装 FFmpeg（需包含 libx264 和 AAC），然后从 `backend/` 目录运行 Worker 和一个 Beat 进程。并发数可按部署机器调整，Redis 同时执行账号总并发和单引擎并发限制。
-
-```bash
-python -m celery -A worker.tasks:celery_app worker -Q i2v_generate --pool=prefork --concurrency=25 --loglevel=INFO
-python -m celery -A worker.tasks:celery_app beat --schedule=/tmp/i2v-worker-beat --loglevel=INFO
-```
-
-本机调试可用 `--pool=solo --concurrency=1`。进程级硬超时需要 Linux 或 WSL 的 prefork。若 FFmpeg 不在 PATH，设置 `I2V_FFMPEG` 为可执行文件路径。修改 `.env` 后重启 FastAPI 和 Worker。
-
-Worker 在 600 秒后结束生成等待。上游仍在排队时尝试取消，上游已经在运行时按 MiniMax 接口限制走本地失败退额。上游任务创建响应丢失时直接退额，避免重发已可能计费的请求。失败回调使用现有 MySQL 事务的幂等退额规则。
-
-## 持久派发
-
-真实生成以 MySQL Outbox 派发。升级已有数据库时先执行 `docs/migrations/001_generation_outbox.sql`。新库由 `docs/schema.sql` 初始化。部署时先暂停提交和旧消费者，完成迁移，再启用新消费者、Dispatcher 与新的 API。保留并盘点原队列和活动作品，迁移不会回填或重投旧记录。
-
-从 `backend/` 启动一份或多份独立 Dispatcher，与 FastAPI、Worker 配置相同的 MySQL/Redis。
+在 `backend/` 下分别运行以下长期进程。生成 Worker 可先用并发 1，生产并发按实际压测调整。单独启动一个恢复 Worker，使扫描不被长时间的视频任务占住。每套共享数据库和队列只启动一个 Beat。
 
 ```bash
 python -m worker.outbox_dispatcher
+python -m celery -A worker.tasks:celery_app worker -Q i2v_generate --hostname=generation@%h --pool=prefork --concurrency=1 --loglevel=INFO
+python -m celery -A worker.tasks:celery_app worker -Q i2v_recovery --hostname=recovery@%h --pool=prefork --concurrency=1 --loglevel=INFO
+python -m celery -A worker.tasks:celery_app beat --schedule=/tmp/i2v-worker-beat --loglevel=INFO
 ```
 
-真实提交返回 `queued` 表示 MySQL 已持久接收。Dispatcher 对失败发布退避，对已发布但未被 Worker 领取的事件补派。MySQL 记录收件后进入 Worker 执行边界，接管与上游未知请求对账分别由 007、002 完善。Redis 仍用于用户会话与排队显示，Redis 故障时浏览器可能暂时无法通过认证。
+本地可用 `--pool=solo --concurrency=1` 调试。验证进程级 Celery 硬超时需用 Linux 或 WSL 的 prefork。
 
-回滚前暂停提交，盘点 `generation_outbox` 中 `received_at IS NULL` 和已领取但未完成的 Work；在旧版 API 恢复直派发前先处理这些事件。保留新增表和历史记录。
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `I2V_LEASE_SECONDS` | 60 秒 | MySQL 租约及 Redis 并发槽有效期 |
+| `I2V_HEARTBEAT_SECONDS` | 15 秒 | 续租频率，必须小于租期的一半 |
+| `I2V_POLL_INTERVAL_SECONDS` | 5 秒 | MiniMax 查询间隔 |
+| `I2V_RECONCILE_MAX_HOURS` | 6 小时 | 已知任务在同一尝试状态停留的人工核对阈值 |
+| `I2V_ACCOUNT_CONCURRENCY` | 30 | Redis 中的账号级并发槽上限，生产初始值按并发预算设置 |
 
-## 测试
+单次执行片软限时为 600 秒，Celery 硬限时为 645 秒。已知 ID 继续查询原任务。请求结果未知或本地执行超时，配额保持原状，等待恢复或人工核对。
 
-从 `backend/` 目录运行 `python -m pytest worker/test_worker.py -q`。测试不消耗 API 配额。真实出片验收需使用已开通 H3 V2 的账号和有效余额。
+## 迁移和人工核对
+
+已有数据库按 001、002、003 顺序执行 [SQL 迁移](../../docs/migrations)，已确认应用的版本可跳过。空库使用 [初始化脚本](../../docs/schema.sql)。切换前暂停提交并停掉旧 Worker、Beat 和 Dispatcher，先备份并盘点活动任务。迁移为扩展式建表。切换和回滚步骤见[实施报告](../../docs/production-audit/phase-2/IMPLEMENTATION_REPORT.md)。
+
+`generation_manual_review` 提供 Work、尝试、请求及已知供应商任务的标识。MiniMax 查询接口需要供应商任务 ID。只有运营人员已经通过独立证据确认某个上游任务与本地请求相符时，才能通过受控 Shell 录入该 ID。命令会向供应商核验 ID 与状态，并禁止覆盖已有的不同 ID。
+
+```bash
+python -m worker.generation_reconciler WORK_ID REQUEST_ID TASK_ID --confirm-provider-correlation
+```
+
+缺少关联证据时保留人工核对状态。恢复进程继续派发有明确上游任务 ID 的工作。定向和故障注入用法见[实施报告](../../docs/production-audit/phase-2/IMPLEMENTATION_REPORT.md)。
