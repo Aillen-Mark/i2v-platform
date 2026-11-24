@@ -120,6 +120,8 @@ def link_verified_task(
         "cancelled",
     }:
         raise ValueError("Provider did not verify the exact task ID and status")
+    if status["status"] in {"failed", "cancelled"}:
+        raise ValueError(f"Provider task already terminated ({status['status']}); cannot bind it")
 
     with SyncSessionLocal.begin() as session:
         work = active_work(session, work_id)

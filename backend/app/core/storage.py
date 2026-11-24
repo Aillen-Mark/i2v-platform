@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from typing import BinaryIO
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -17,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-_NOT_FOUND_CODES = {"404", "NoSuchBucket", "NotFound", "NoSuchKey"}
+_OBJECT_MISSING = {"NoSuchKey", "NoSuchVersion"}
+_NOT_FOUND_CODES = {"404", "NoSuchBucket", "NotFound", *_OBJECT_MISSING}
 
 # boto3 客户端创建成本很高（要加载 botocore 数据模型，单次 50~150ms），
 # 高并发下载/提交时每次新建会直接把 P95 拉爆，这里做成进程级单例（boto3 Client 本身线程安全）。
@@ -30,20 +34,128 @@ def _client():
     if _CLIENT is None:
         with _CLIENT_LOCK:
             if _CLIENT is None:
-                _CLIENT = boto3.client(
-                    "s3",
-                    endpoint_url=settings.minio_endpoint_url,
-                    aws_access_key_id=settings.MINIO_ACCESS_KEY,
-                    aws_secret_access_key=settings.MINIO_SECRET_KEY,
-                    region_name=settings.MINIO_REGION,
-                    config=Config(
-                        signature_version="s3v4",
-                        s3={"addressing_style": "path"},
-                        max_pool_connections=50,
-                        retries={"max_attempts": 3, "mode": "standard"},
-                    ),
+                _CLIENT = new_s3_client(
+                    settings.minio_endpoint_url,
+                    settings.MINIO_REGION,
+                    settings.MINIO_ACCESS_KEY,
+                    settings.MINIO_SECRET_KEY,
                 )
     return _CLIENT
+
+
+def new_s3_client(endpoint: str, region: str, access_key: str, secret_key: str):
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "path"},
+            max_pool_connections=50,
+            connect_timeout=4,
+            read_timeout=15,
+            retries={"total_max_attempts": 3, "mode": "standard"},
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectMetadata:
+    key: str
+    size: int
+    modified: datetime
+    etag: str | None = None
+    version_id: str | None = None
+
+
+class StorageUnavailable(RuntimeError):
+    """A transport, permission, or bucket error makes the result inconclusive."""
+
+
+class ObjectConflict(RuntimeError):
+    """The destination already contains different bytes."""
+
+
+def _head(client, bucket: str, key: str) -> ObjectMetadata | None:
+    try:
+        info = client.head_object(Bucket=bucket, Key=key)
+    except ClientError as error:
+        code = str(error.response.get("Error", {}).get("Code", ""))
+        if code in _OBJECT_MISSING:
+            return None
+        if code in {"404", "NotFound"}:
+            # HEAD errors from S3 can omit the error body. Confirm the bucket
+            # before treating an ambiguous 404 as a missing key.
+            client.head_bucket(Bucket=bucket)
+            return None
+        raise
+    return ObjectMetadata(
+        key, info["ContentLength"], info["LastModified"], info.get("ETag"), info.get("VersionId")
+    )
+
+
+class ObjectStore:
+    """Operations used by reconciliation and by either side of an object transfer."""
+
+    def __init__(self, bucket: str, client=None):
+        self.bucket = bucket
+        self.client = client if client is not None else _client()
+
+    @contextmanager
+    def operation(self, name: str):
+        try:
+            yield
+        except (ClientError, BotoCoreError) as error:
+            code = (
+                str(error.response.get("Error", {}).get("Code", "")) if isinstance(error, ClientError) else ""
+            )
+            # Only stable diagnostic classes cross this boundary.
+            reason = (
+                code
+                if code in {"AccessDenied", "403", "NoSuchBucket", "404", "500", "503", "SlowDown"}
+                else type(error).__name__
+            )
+            raise StorageUnavailable(f"{name}:{reason}") from None
+
+    def head(self, key: str) -> ObjectMetadata | None:
+        with self.operation("HEAD"):
+            return _head(self.client, self.bucket, key)
+
+    def page(self, limit: int, token: str | None = None):
+        options = {"ContinuationToken": token} if token else {}
+        with self.operation("LIST"):
+            response = self.client.list_objects_v2(Bucket=self.bucket, MaxKeys=limit, **options)
+        next_token = response.get("NextContinuationToken")
+        if response.get("IsTruncated") and (not next_token or next_token == token):
+            raise StorageUnavailable("LIST:invalid_continuation")
+        return [
+            ObjectMetadata(item["Key"], item["Size"], item["LastModified"], item.get("ETag"))
+            for item in response.get("Contents", [])
+        ], next_token
+
+    def chunks(self, key: str):
+        with self.operation("GET"):
+            yield from _chunks(self.client, self.bucket, key)
+
+    def put_new(self, key: str, stream: BinaryIO, size: int, content_type: str) -> bool:
+        """Write atomically if absent. False means an existing object won the race."""
+        with self.operation("PUT_IF_ABSENT"):
+            try:
+                self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=stream,
+                    ContentLength=size,
+                    ContentType=content_type,
+                    IfNoneMatch="*",
+                )
+            except ClientError as error:
+                if error.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 412:
+                    return False
+                raise
+        return True
 
 
 def ensure_bucket(bucket: str) -> str:
@@ -141,32 +253,15 @@ def upload_file(
 
 
 def object_exists(bucket: str, key: str) -> bool:
-    client = _client()
-    try:
-        client.head_object(Bucket=bucket, Key=key)
-        return True
-    except ClientError as exc:
-        code = str(exc.response.get("Error", {}).get("Code", ""))
-        if code in _NOT_FOUND_CODES:
-            return False
-        raise
+    return _head(_client(), bucket, key) is not None
 
 
 def object_size(bucket: str, key: str) -> int | None:
-    """对象字节数；不存在返回 None。"""
-    client = _client()
-    try:
-        return int(client.head_object(Bucket=bucket, Key=key).get("ContentLength") or 0)
-    except ClientError as exc:
-        code = str(exc.response.get("Error", {}).get("Code", ""))
-        if code in _NOT_FOUND_CODES:
-            return None
-        raise
+    metadata = _head(_client(), bucket, key)
+    return metadata.size if metadata is not None else None
 
 
-def iter_object_chunks(bucket: str, key: str, chunk_size: int = 256 * 1024):
-    """流式读取对象（边拉边吐，绝不整体读入内存），用于 zip 打包下载。"""
-    client = _client()
+def _chunks(client, bucket: str, key: str, chunk_size: int = 256 * 1024):
     body = client.get_object(Bucket=bucket, Key=key)["Body"]
     try:
         for chunk in body.iter_chunks(chunk_size):
@@ -174,3 +269,8 @@ def iter_object_chunks(bucket: str, key: str, chunk_size: int = 256 * 1024):
                 yield chunk
     finally:
         body.close()
+
+
+def iter_object_chunks(bucket: str, key: str, chunk_size: int = 256 * 1024):
+    """Stream the object without buffering it for the ZIP or worker paths."""
+    yield from _chunks(_client(), bucket, key, chunk_size)

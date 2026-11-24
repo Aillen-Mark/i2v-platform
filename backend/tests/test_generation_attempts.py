@@ -111,3 +111,85 @@ async def test_uncertain_request_waits_for_verified_reconciliation(
     with SyncSessionLocal() as session:
         assert session.scalar(select(Quota.quota_used)) == 0
         assert session.get(Work, work_id).quota_refunded == 1
+
+
+@pytest.mark.parametrize("provider_status", ["failed", "cancelled"])
+async def test_reconciler_rejects_terminated_provider_task(
+    provider_status, admin_client, candidate_client_factory, monkeypatch
+):
+    from app.services import works
+
+    client, draft = await prepare_work(admin_client, candidate_client_factory)
+    monkeypatch.setattr(works.settings, "MOCK_WORKER", False)
+    work_id = draft["id"]
+    assert (await client.post(f"/api/works/{work_id}/generate")).status_code == 200
+    attempt = prepare_attempt(work_id)
+    uncertain = change_attempt(
+        change_attempt(attempt, "submitting"), "submission_unknown", error="UPSTREAM_TIMEOUT"
+    )
+
+    def reply(request):
+        task_id = request.url.path.rsplit("/", 1)[1]
+        return httpx.Response(200, json={"task": {"id": task_id, "status": provider_status}})
+
+    with httpx.Client(transport=httpx.MockTransport(reply)) as http:
+        with pytest.raises(ValueError, match="already terminated"):
+            link_verified_task(
+                work_id,
+                uncertain.request_id,
+                "terminated-task",
+                MiniMax(http, "test", "https://example"),
+                reason="INC-99",
+            )
+    assert prepare_attempt(work_id).status == "submission_unknown"
+
+
+@pytest.mark.parametrize(
+    "provider_status,media_failed,allowed",
+    [
+        ("queued", False, True),
+        ("succeeded", False, True),
+        ("succeeded", True, True),
+        ("queued", True, False),
+        ("running", True, False),
+        ("failed", True, False),
+        ("cancelled", True, False),
+    ],
+)
+async def test_manual_binding_respects_recovery_status(
+    provider_status,
+    media_failed,
+    allowed,
+    admin_client,
+    candidate_client_factory,
+    monkeypatch,
+):
+    from app.services import works
+
+    client, draft = await prepare_work(admin_client, candidate_client_factory)
+    monkeypatch.setattr(works.settings, "MOCK_WORKER", False)
+    work_id = draft["id"]
+    assert (await client.post(f"/api/works/{work_id}/generate")).status_code == 200
+    task = "approved-task"
+    attempt = change_attempt(prepare_attempt(work_id), "submitting")
+    if media_failed:
+        attempt = change_attempt(attempt, "accepted", task_id=task)
+        attempt = change_attempt(attempt, "uploading")
+        attempt = change_attempt(attempt, "manual_review", error="MEDIA_FAILED")
+    else:
+        attempt = change_attempt(attempt, "submission_unknown")
+
+    def reply(_):
+        return httpx.Response(200, json={"task": {"id": task, "status": provider_status}})
+
+    with httpx.Client(transport=httpx.MockTransport(reply)) as http:
+        provider = MiniMax(http, "test", "https://example.test")
+        if allowed:
+            link_verified_task(work_id, attempt.request_id, task, provider, reason="INC-99")
+        else:
+            with pytest.raises(ValueError):
+                link_verified_task(work_id, attempt.request_id, task, provider, reason="INC-99")
+    expected = ("uploading" if media_failed else "accepted") if allowed else attempt.status
+    assert prepare_attempt(work_id).status == expected
+    with SyncSessionLocal() as session:
+        assert session.scalar(select(Quota.quota_used)) == 1

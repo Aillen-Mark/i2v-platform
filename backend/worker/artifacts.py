@@ -12,6 +12,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core.config import get_settings
 from app.core.database import SyncSessionLocal
+from app.core.object_integrity import ObjectSizeMismatch, stream_digest
 from app.core.storage import iter_object_chunks, object_size, upload_file
 from app.services.execution_lease import ExecutionLease, active_work, check_lease
 from worker.media_process import MediaError, check_deadline
@@ -49,18 +50,14 @@ def _matches_size(artifact: Artifact) -> bool:
 
 
 def _verify_body(artifact: Artifact, deadline: float, lost, output=None) -> bool:
-    digest = sha256()
-    size = 0
-    with closing(iter_object_chunks(get_settings().MINIO_BUCKET_VIDEOS, artifact.key)) as chunks:
-        for chunk in chunks:
-            check_deadline(deadline, lost)
-            size += len(chunk)
-            if size > artifact.size:
-                return False
-            digest.update(chunk)
-            if output is not None:
-                output.write(chunk)
-    return size == artifact.size and digest.hexdigest() == artifact.digest
+    try:
+        with closing(iter_object_chunks(get_settings().MINIO_BUCKET_VIDEOS, artifact.key)) as chunks:
+            result = stream_digest(
+                chunks, artifact.size, output=output, check=lambda _: check_deadline(deadline, lost)
+            )
+    except ObjectSizeMismatch:
+        return False
+    return result.size == artifact.size and result.sha256 == artifact.digest
 
 
 def recover(
