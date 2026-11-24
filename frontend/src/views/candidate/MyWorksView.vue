@@ -17,9 +17,9 @@
 
     <el-empty v-if="!loading && (works?.total ?? 0) === 0" description="还没有作品，去创作工作台提交一条吧" />
 
-    <div v-for="group in works?.groups ?? []" :key="group.question_id" class="panel group mt-16">
+    <div v-for="group in displayGroups" :key="group.question_id" class="panel group mt-16">
       <div class="panel-title flex" style="align-items: center; justify-content: space-between">
-        <span>{{ group.question_code }} · {{ group.question_title }}</span>
+        <span>{{ singleMode ? '全部作品' : `${group.question_code} · ${group.question_title}` }}</span>
         <span class="muted">{{ group.total }} 条</span>
       </div>
       <div class="cards">
@@ -92,6 +92,25 @@ const downloadableCount = computed(
   () => (works.value?.items ?? []).filter((item) => item.download_ready).length,
 )
 
+/** 单题极简模式：只有 1 道题时不再渲染分组头，直接平铺全部作品 */
+const singleMode = computed(() => (works.value?.groups?.length ?? 0) <= 1)
+
+const displayGroups = computed(() => {
+  const groups = works.value?.groups ?? []
+  if (groups.length) return groups
+  const items = works.value?.items ?? []
+  if (!items.length) return []
+  return [
+    {
+      question_id: items[0].question_id,
+      question_code: items[0].question_code,
+      question_title: items[0].question_title,
+      total: items.length,
+      works: items,
+    },
+  ]
+})
+
 function statusType(status: WorkStatus): 'success' | 'warning' | 'danger' | 'info' {
   if (status === 'succeeded') return 'success'
   if (status === 'failed') return 'danger'
@@ -117,7 +136,7 @@ function openPreview(item: WorkItem): void {
   }
   previewItem.value = item
   previewUrl.value = item.preview_url
-  previewTitle.value = `${item.question_code} · 第 ${item.seq ?? 1} 次`
+  previewTitle.value = singleMode.value ? `第 ${item.seq ?? 1} 次生成` : `${item.question_code} · 第 ${item.seq ?? 1} 次`
   previewVisible.value = true
 }
 
