@@ -11,7 +11,6 @@
       <div class="toolbar">
         <el-tabs v-model="tab" class="tab-inline">
           <el-tab-pane label="按考生" name="candidate" />
-          <el-tab-pane label="按题目" name="question" />
           <el-tab-pane label="按模型" name="engine" />
           <el-tab-pane label="按天" name="day" />
         </el-tabs>
@@ -40,22 +39,6 @@
         <el-table-column prop="failed_count" label="失败" width="80" />
         <el-table-column label="最后活跃" width="170">
           <template #default="{ row }">{{ formatDateTime(row.last_active_at) }}</template>
-        </el-table-column>
-      </el-table>
-
-      <el-table v-else-if="tab === 'question'" :data="byQuestion" v-loading="loading" size="small" stripe>
-        <el-table-column prop="code" label="题号" width="100" />
-        <el-table-column prop="title" label="题目" min-width="180" />
-        <el-table-column prop="total" label="生成数" width="90" />
-        <el-table-column prop="succeeded" label="成功" width="80" />
-        <el-table-column prop="failed" label="失败" width="80" />
-        <el-table-column label="失败率" width="100">
-          <template #default="{ row }">
-            <span :class="{ 'text-danger': row.fail_rate > 20 }">{{ row.fail_rate }}%</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="平均耗时(s)" width="110">
-          <template #default="{ row }">{{ row.avg_cost_sec ?? '—' }}</template>
         </el-table-column>
       </el-table>
 
@@ -124,17 +107,15 @@ import type {
   StatsByCandidate,
   StatsByDay,
   StatsByEngine,
-  StatsByQuestion,
   StatsOverview,
   VideoLink,
 } from '@/api/adminTypes'
 import { formatDateTime } from '@/utils/format'
 
-const tab = ref<'candidate' | 'question' | 'engine' | 'day'>('candidate')
+const tab = ref<'candidate' | 'engine' | 'day'>('candidate')
 const loading = ref(false)
 const overview = ref<StatsOverview | null>(null)
 const byCandidate = ref<StatsByCandidate[]>([])
-const byQuestion = ref<StatsByQuestion[]>([])
 const byEngine = ref<StatsByEngine[]>([])
 const byDay = ref<StatsByDay[]>([])
 const candidateTotal = ref(0)
@@ -172,7 +153,6 @@ async function loadTab(): Promise<void> {
   loading.value = true
   try {
     if (tab.value === 'candidate') await loadCandidates(1)
-    else if (tab.value === 'question') byQuestion.value = await adminApi.statsByQuestion()
     else if (tab.value === 'engine') byEngine.value = await adminApi.statsByEngine()
     else byDay.value = await adminApi.statsByDay(30)
   } finally {

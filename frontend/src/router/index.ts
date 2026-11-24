@@ -79,6 +79,9 @@ const router = createRouter({
           name: 'admin-questions',
           component: AdminQuestionsView,
           meta: { requiresAdmin: true, title: '题目管理' },
+          // 单题极简模式：屏蔽题目管理入口（QuestionsView.vue 源码保留）。
+          // 恢复多题模式时，删掉下面这一行 beforeEnter 即可（同时在 AdminLayout 放开菜单项）。
+          beforeEnter: () => ({ path: '/console/candidates' }),
         },
         {
           path: 'quotas',

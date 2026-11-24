@@ -6,14 +6,8 @@
         <div class="form-block">
           <el-form label-width="120px">
             <el-form-item label="题目">
-              <el-select v-model="qForm.question_id" placeholder="选择题目" style="width: 320px">
-                <el-option
-                  v-for="item in questions"
-                  :key="item.id"
-                  :label="`${item.code} · ${item.title}`"
-                  :value="item.id"
-                />
-              </el-select>
+              <el-tag type="info" size="large">{{ activeQuestion ? activeQuestion.title : '未就绪' }}</el-tag>
+              <span class="muted ml-8">单题模式：全场固定 1 道创作任务，无需选择</span>
             </el-form-item>
             <el-form-item label="目标次数">
               <el-input-number v-model="qForm.quota_total" :min="0" :max="100" />
@@ -113,9 +107,8 @@
               <span class="muted ml-8">已选 {{ bForm.candidate_ids.length }} 人</span>
             </el-form-item>
             <el-form-item label="题目">
-              <el-select v-model="bForm.question_id" placeholder="选择题目" style="width: 320px">
-                <el-option v-for="item in questions" :key="item.id" :label="`${item.code} · ${item.title}`" :value="item.id" />
-              </el-select>
+              <el-tag type="info" size="large">{{ activeQuestion ? activeQuestion.title : '未就绪' }}</el-tag>
+              <span class="muted ml-8">单题模式：全场固定 1 道创作任务，无需选择</span>
             </el-form-item>
             <el-form-item label="增减次数">
               <el-input-number v-model="bForm.delta" :min="-100" :max="100" />
@@ -155,7 +148,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { AxiosError } from 'axios'
@@ -169,6 +162,11 @@ const route = useRoute()
 const tab = ref<'question' | 'candidate' | 'batch'>('question')
 const questions = ref<QuestionRow[]>([])
 const saving = ref(false)
+
+/** 单题模式：锁定唯一启用题目，页面不再提供题目下拉选择 */
+const activeQuestion = computed<QuestionRow | null>(
+  () => questions.value.find((item) => item.status === 1) ?? questions.value[0] ?? null,
+)
 
 const qForm = reactive({ question_id: null as number | null, quota_total: 2, remark: '' })
 const cForm = reactive({ candidate_id: null as number | null, uniform: 2, remark: '' })
@@ -187,6 +185,10 @@ let pendingAction: (() => Promise<void>) | null = null
 
 onMounted(async () => {
   questions.value = await adminApi.listQuestions()
+  if (activeQuestion.value) {
+    qForm.question_id = activeQuestion.value.id
+    bForm.question_id = activeQuestion.value.id
+  }
   const preset = route.query.candidate_ids
   if (typeof preset === 'string' && preset.trim()) {
     bForm.candidate_ids = preset.split(',').map((item) => Number(item)).filter((item) => Number.isFinite(item))
@@ -209,7 +211,13 @@ async function loadCandidateQuotas(): Promise<void> {
   if (!cForm.candidate_id) return
   loadingQuotas.value = true
   try {
-    const data = await adminApi.listQuotas({ candidate_id: cForm.candidate_id, page: 1, size: 100 })
+    // 单题模式：只拉当前启用题目的配额行，避免展示已停用题目的噪音数据
+    const data = await adminApi.listQuotas({
+      candidate_id: cForm.candidate_id,
+      question_id: activeQuestion.value?.id,
+      page: 1,
+      size: 100,
+    })
     candidateQuotas.value = data.items
   } finally {
     loadingQuotas.value = false

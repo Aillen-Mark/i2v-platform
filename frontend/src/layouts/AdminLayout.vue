@@ -49,7 +49,9 @@ const route = useRoute()
 
 const menu = [
   { path: '/console/candidates', label: '考生管理' },
-  { path: '/console/questions', label: '题目管理' },
+  // 单题极简模式：全场固定 1 道创作任务，题目管理入口已屏蔽（QuestionsView.vue 源码保留，
+  // 将来恢复多题模式时把这一行放开、并去掉 router 里的 /console/questions 重定向即可）
+  // { path: '/console/questions', label: '题目管理' },
   { path: '/console/quotas', label: '配额中心' },
   { path: '/console/time-windows', label: '开放时段' },
   { path: '/console/engines', label: '模型引擎' },
