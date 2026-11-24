@@ -30,7 +30,7 @@ from app.core.errors import register_exception_handlers
 from app.core.redis import check_redis, close_redis
 from app.core.security import hash_password
 from app.core.storage import ensure_buckets
-from app.models import Admin
+from app.models import Admin, Question
 from app.services.hashing import shutdown_pool as shutdown_hash_pool
 from app.services.hashing import warmup as warmup_hash_pool
 
@@ -91,6 +91,68 @@ async def ensure_default_admin() -> None:
             logger.exception("创建默认管理员失败")
 
 
+# 单题极简模式：全场固定 1 道创作任务，启动时若没有启用题目就自动补一条
+DEFAULT_QUESTION_CODE = "Q1"
+DEFAULT_QUESTION_PAYLOAD: dict[str, Any] = {
+    "code": DEFAULT_QUESTION_CODE,
+    "title": "图生视频创作",
+    "description": "请上传首帧图片并输入提示词生成 15 秒视频作品",
+    "prompt_examples": [
+        "镜头缓慢推近，主体清晰，电影质感，暖色调",
+        "环绕运镜展示主体全貌，浅景深，自然光",
+        "低角度仰拍，主体动态舒展，背景虚化",
+    ],
+    "default_quota": 2,
+    "sort_order": 1,
+    "status": 1,
+}
+
+
+async def ensure_default_question() -> None:
+    """单题极简模式兜底：没有任何启用题目时，自动补一条默认创作题并给全体考生补配额。
+
+    多 worker 同时启动时靠 `questions.code` 唯一键兜底：抢输的 worker 只会拿到
+    IntegrityError，回滚即可，不影响启动。
+    """
+    if not settings.SINGLE_QUESTION_MODE:
+        return
+
+    async with AsyncSessionLocal() as session:
+        enabled = await session.scalar(
+            select(func.count()).select_from(Question).where(Question.status == 1)
+        )
+        if enabled:
+            return
+
+        question = (
+            await session.execute(select(Question).where(Question.code == DEFAULT_QUESTION_CODE))
+        ).scalar_one_or_none()
+        if question is None:
+            question = Question(**DEFAULT_QUESTION_PAYLOAD)
+            session.add(question)
+        else:
+            # 存在同 code 的停用题：重新启用并刷新文案
+            question.title = str(DEFAULT_QUESTION_PAYLOAD["title"])
+            question.description = str(DEFAULT_QUESTION_PAYLOAD["description"])
+            question.default_quota = int(DEFAULT_QUESTION_PAYLOAD["default_quota"])
+            question.status = 1
+            if not question.prompt_examples:
+                question.prompt_examples = DEFAULT_QUESTION_PAYLOAD["prompt_examples"]
+
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            logger.info("默认创作题目已由其他 worker 创建，跳过")
+            return
+
+        from app.services.quota import backfill_quotas_for_question
+
+        rows = await backfill_quotas_for_question(session, question.id, question.default_quota)
+        await session.commit()
+        logger.info("单题模式：已就绪默认创作题目 %s，补建配额行 %s 条", question.code, rows)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("应用启动：%s (%s)", settings.APP_NAME, settings.APP_ENV)
@@ -116,6 +178,7 @@ async def lifespan(app: FastAPI):
     logger.info("对象存储桶就绪：%s", buckets)
 
     await ensure_default_admin()
+    await ensure_default_question()
 
     # 预热批量哈希进程池：让 16 个 spawn 子进程提前就位，
     # 否则首次 Excel 导入要在请求里额外付 1~2 秒的进程启动开销。

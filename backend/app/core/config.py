@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     # Excel 导入
     EXCEL_IMPORT_MAX_ROWS: int = 5000
 
+    # 单题极简模式：全场固定 1 道创作任务，启动时若没有启用题目则自动补一条默认题
+    # （pytest 通过环境变量关闭，避免影响题目数量相关断言）
+    SINGLE_QUESTION_MODE: bool = True
+
     # Mock Worker
     MOCK_WORKER: bool = True
     MOCK_SUCCESS_RATE: float = 0.8

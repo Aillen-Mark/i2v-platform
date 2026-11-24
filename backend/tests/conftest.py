@@ -21,6 +21,8 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 os.environ["MYSQL_DATABASE"] = "i2v_platform_test"
 os.environ["REDIS_DB"] = "15"
+# 单题极简模式的启动兜底会插入默认题目，测试里必须关掉，否则会干扰题目数量断言
+os.environ["SINGLE_QUESTION_MODE"] = "false"
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 
 import pymysql  # noqa: E402
