@@ -76,23 +76,29 @@ async def main() -> int:
         password = created.json()["password"]
         ok("POST /admin/candidates", f"{account} / 初始密码 {password}")
 
-        # 4) 建题目
-        question = await client.post(
-            "/admin/questions",
-            json={
-                "code": f"E{tag[:3]}",
-                "title": "冒烟题目",
-                "description": "端到端冒烟用题目",
-                "default_quota": 2,
-                "sort_order": 1,
-                "status": 1,
-            },
-        )
-        if question.status_code != 200:
-            fail("新增题目", question.text)
-            return 1
-        question_id = question.json()["id"]
-        ok("POST /admin/questions", f"id={question_id}")
+        # 4) 单题极简模式：复用库里唯一启用题目，不再新建（没有启用题时才兜底创建）
+        questions_admin = (await client.get("/admin/questions")).json()
+        enabled = [item for item in questions_admin if item["status"] == 1]
+        if enabled:
+            question_id = enabled[0]["id"]
+            ok("GET /admin/questions", f"复用唯一启用题目 id={question_id}（{enabled[0]['title']}）")
+        else:
+            created_q = await client.post(
+                "/admin/questions",
+                json={
+                    "code": f"E{tag[:3]}",
+                    "title": "冒烟题目",
+                    "description": "端到端冒烟用题目",
+                    "default_quota": 2,
+                    "sort_order": 1,
+                    "status": 1,
+                },
+            )
+            if created_q.status_code != 200:
+                fail("新增题目", created_q.text)
+                return 1
+            question_id = created_q.json()["id"]
+            ok("POST /admin/questions", f"id={question_id}")
 
         # 5) 开一个覆盖当前时间的时段
         now = time.time()

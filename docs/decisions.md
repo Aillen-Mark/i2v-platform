@@ -76,4 +76,7 @@
 | A45 | 2026-11-23 | **M6**：MySQL 加 `--innodb-flush-log-at-trx-commit=2` | 提交是「每请求一次 commit」的小事务，100 并发下 redo fsync 成为瓶颈；代价是极端断电可能丢最近 1 秒已提交事务（考试场景可接受，且已有重试/退还兜底） |
 | A46 | 2026-11-23 | **M6**：boto3 客户端做成进程级单例（`max_pool_connections=50`）；下载 `file_size` 优先取 `works.file_size`，缺失才回源 S3 HEAD | 每次调用新建 boto3 客户端要 50~150ms，直接把下载 P95 拉到秒级 |
 | A47 | 2026-11-23 | **M6.1**：Nginx 改为完整主配置（`worker_processes 1` + `upstream keepalive 256`），限流 `rate=100r/s burst=300 nodelay`；uvicorn 默认线程池放大到 32；登录会话写入改 Redis pipeline；压测客户端启动前预热 130 次网关请求 | 实测：多 worker 的 nginx 连接池被打散 + Windows 丢 SYN → 洪峰时出现 502；改单 worker + keepalive 后 502/503 归零，提交 P95 从 822ms 降到 580ms |
+| A48 | 2026-11-24 | **M6.2**：单题极简模式——`SINGLE_QUESTION_MODE=True` 时启动兜底插入默认题 `Q1 / 图生视频创作`（无启用题目才插，含 3 条运镜示例与配额补建）；pytest 在 `conftest` 里置 `false`，保证题目数量断言不受影响 | 全场固定 1 道创作任务，但底层 `questions` / `quotas.question_id` / `works.question_id` 全部保留，恢复多题模式只需把开关改回 false |
+| A49 | 2026-11-24 | **M6.2**：管理端屏蔽题目管理（`AdminLayout` 菜单注释 + `/console/questions` 走 `beforeEnter` 重定向，`QuestionsView.vue` 源码与 import 保留）；配额页锁定唯一启用题、按考生查配额只拉该题行；统计去掉「按题目」Tab | 恢复多题模式 = 删一行 `beforeEnter` + 放开一行菜单 |
+| A50 | 2026-11-24 | **M6.2**：考生端工作台改居中单题布局，画幅不再手选，改为按首帧宽高比用 log 距离就近匹配后端允许的 5 种（16:9 / 4:3 / 1:1 / 3:4 / 9:16），偏差 >15% 提示会裁切或补边 | 后端 `ALLOWED_ASPECT_RATIOS` 只有这 5 个值，自动匹配只能产出这 5 个，21:9 仍被 400 拒绝 |
 
