@@ -95,7 +95,7 @@ async def ensure_default_admin() -> None:
 DEFAULT_QUESTION_CODE = "Q1"
 DEFAULT_QUESTION_PAYLOAD: dict[str, Any] = {
     "code": DEFAULT_QUESTION_CODE,
-    "title": "图生视频创作",
+    "title": "图生视频创意作品制作",
     "description": "请上传首帧图片并输入提示词生成 15 秒视频作品",
     "prompt_examples": [
         "镜头缓慢推近，主体清晰，电影质感，暖色调",
