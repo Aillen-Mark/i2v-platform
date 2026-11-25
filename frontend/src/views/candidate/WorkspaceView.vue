@@ -1,150 +1,185 @@
 <template>
-  <div class="workspace page">
+  <div class="workspace">
+    <!-- X 型对角斜切灰白几何背景 + 超大淡英文水印（全部 CSS/SVG 绘制，无外链） -->
+    <div class="geo-bg" aria-hidden="true">
+      <svg class="geo-svg" viewBox="0 0 1200 760" preserveAspectRatio="none">
+        <rect width="1200" height="760" fill="#FFFFFF" />
+        <polygon points="0,0 1200,0 1200,150 0,410" fill="#EAECEF" />
+        <polygon points="0,760 1200,760 1200,610 0,350" fill="#EEF1F5" />
+        <polygon points="0,410 1200,150 1200,205 0,465" fill="#E5E9F0" opacity="0.8" />
+        <polygon points="0,350 1200,610 1200,665 0,405" fill="#E5E9F0" opacity="0.7" />
+      </svg>
+      <div class="watermark">AI VIDEO STUDIO</div>
+    </div>
+
     <div class="shell">
-      <!-- 顶部：任务说明与剩余次数 -->
-      <header class="hero panel">
-        <div class="hero-main">
-          <h1 class="hero-title">{{ question?.title || '图生视频创作' }}</h1>
-          <p class="hero-desc">{{ question?.description || '请上传首帧图片并输入提示词生成 15 秒视频作品' }}</p>
-        </div>
-        <div class="hero-side">
-          <el-tag
-            size="large"
-            :type="remaining > 0 ? 'success' : 'info'"
-            effect="dark"
-            class="quota-tag"
-          >
-            剩余 {{ remaining }} / 共 {{ total }} 次
-          </el-tag>
-          <div class="muted mt-8" v-if="!auth.inWindow">{{ windowBlockedText }}</div>
-        </div>
+      <!-- 居中主标题组 -->
+      <header class="stage-title">
+        <div class="eyebrow"><span class="eyebrow-line" />CREATION STUDIO · 单题创作任务<span class="eyebrow-line" /></div>
+        <h2 class="stage-h2">{{ question?.title || '图生视频创意作品制作' }}</h2>
+        <div class="title-rule"><span /></div>
+        <p class="stage-sub">{{ question?.description || '请上传首帧图片并输入提示词生成 15 秒视频作品' }}</p>
       </header>
 
-      <!-- 创作卡片 -->
-      <section class="panel card">
-        <el-alert
-          v-if="restoredNotice"
-          type="info"
-          :closable="true"
-          show-icon
-          class="restore-alert"
-          @close="restoredNotice = false"
-        >
-          <template #title>
-            已恢复上次未提交草稿（{{ restoredAt }}）
-            <el-button link type="primary" size="small" @click="clearDraftNow">清空草稿</el-button>
-          </template>
-        </el-alert>
+      <!-- ================= 正中双步骤创作主工作舱 ================= -->
+      <section class="studio panel">
+        <div class="studio-top" />
+        <div class="studio-intro">
+          <span class="intro-badge">创作舱</span>
+          <span class="muted">按 01 / 02 两步完成素材与镜头描述，确认后提交生成</span>
+          <span class="quota-pill">剩余创作机会 <b>{{ remaining }}</b> / {{ total }} 次</span>
+        </div>
 
-        <div class="block-label">首帧图片（JPG / PNG / WEBP，≤10MB，长边自动压到 1920px）</div>
-        <div
-          class="dropzone"
-          :class="{ dragging }"
-          @dragover.prevent="dragging = true"
-          @dragleave.prevent="dragging = false"
-          @drop.prevent="onDrop"
-          @click="pickFile"
-        >
-          <template v-if="image">
-            <img :src="image.dataUrl" alt="首帧预览" class="preview" />
-            <div class="preview-meta muted">
-              {{ image.originalWidth }}×{{ image.originalHeight }}
-              <template v-if="image.compressed"> → 已压缩 {{ image.width }}×{{ image.height }}</template>
-              · {{ formatSize(image.size) }}
+        <div class="studio-grid">
+          <!-- 01 首帧视觉素材 -->
+          <div class="step">
+            <div class="step-head">
+              <span class="step-num">01</span>
+              <div>
+                <div class="step-title">首帧视觉素材</div>
+                <div class="muted">JPG / PNG / WEBP，≤10MB，长边自动压至 1920px</div>
+              </div>
             </div>
-          </template>
-          <template v-else>
-            <div class="drop-hint">点击选择或把图片拖到这里</div>
-            <div class="muted">支持 JPG / PNG / WEBP，最大 10MB</div>
-          </template>
-        </div>
-        <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/webp" class="hidden-input" @change="onFileChange" />
 
-        <div class="block-label mt-16">提示词（{{ prompt.length }} / 300）</div>
-        <el-input
-          v-model="prompt"
-          type="textarea"
-          :rows="5"
-          maxlength="300"
-          show-word-limit
-          resize="none"
-          placeholder="描述你想要的画面，例如：一只橘猫在雪地里奔跑，夕阳逆光，电影质感"
-        />
+            <div
+              class="dropzone"
+              :class="{ dragging }"
+              @dragover.prevent="dragging = true"
+              @dragleave.prevent="dragging = false"
+              @drop.prevent="onDrop"
+              @click="pickFile"
+            >
+              <template v-if="image">
+                <img :src="image.dataUrl" alt="首帧预览" class="preview" />
+                <div class="preview-meta muted">
+                  {{ image.originalWidth }}×{{ image.originalHeight }}
+                  <template v-if="image.compressed"> → 已压缩 {{ image.width }}×{{ image.height }}</template>
+                  · {{ formatSize(image.size) }}
+                </div>
+              </template>
+              <template v-else>
+                <svg class="upload-icon" width="42" height="42" viewBox="0 0 42 42" aria-hidden="true">
+                  <polygon points="21,2 39,12 39,30 21,40 3,30 3,12" fill="#E3F5F8" stroke="#0085A1" stroke-width="1.5" />
+                  <path d="M21 13 L21 28 M14 21 L21 14 L28 21" fill="none" stroke="#0085A1" stroke-width="2" stroke-linecap="square" />
+                </svg>
+                <div class="drop-hint">点击选择或把图片拖到这里</div>
+                <div class="muted">首帧决定画面基调，建议使用清晰横/竖构图</div>
+              </template>
+            </div>
+            <input ref="fileInput" type="file" accept="image/jpeg,image/png,image/webp" class="hidden-input" @change="onFileChange" />
 
-        <div class="ratio-row mt-12">
-          <span class="muted">画幅</span>
-          <el-tag v-if="image" type="success" effect="plain">{{ detectedRatio }}</el-tag>
-          <el-tag v-else type="info" effect="plain">上传首帧后自动匹配</el-tag>
-          <span class="muted">{{ ratioHint }}</span>
-          <el-button link type="primary" size="small" @click="clearDraftNow">清空草稿</el-button>
-        </div>
+            <div class="asset-meta">
+              <span class="ratio-label">画幅 <b>{{ detectedRatio }}</b></span>
+              <span class="muted ratio-hint">{{ ratioHint }}</span>
+              <button v-if="image" type="button" class="reselect" @click="pickFile">重新选图</button>
+            </div>
+          </div>
 
-        <el-alert
-          v-if="!auth.inWindow"
-          type="warning"
-          :closable="false"
-          show-icon
-          class="mt-16"
-          :title="windowBlockedText"
-        />
-        <el-alert
-          v-else-if="remaining <= 0"
-          type="error"
-          :closable="false"
-          show-icon
-          class="mt-16"
-          title="生成次数已用完，无法继续提交"
-        />
+          <!-- 02 镜头动态提示词 -->
+          <div class="step">
+            <div class="step-head">
+              <span class="step-num">02</span>
+              <div>
+                <div class="step-title">镜头动态提示词</div>
+                <div class="muted">描述运镜、光线与主体动作，≤300 字</div>
+              </div>
+            </div>
 
-        <el-button
-          type="primary"
-          size="large"
-          class="submit"
-          :loading="submitting"
-          :disabled="!canSubmit"
-          @click="submit"
-        >
-          {{ submitting ? '提交中…' : '提交生成（消耗 1 次机会）' }}
-        </el-button>
-      </section>
+            <el-input
+              v-model="prompt"
+              type="textarea"
+              :rows="8"
+              maxlength="300"
+              show-word-limit
+              resize="none"
+              placeholder="例如：镜头缓慢推近，一只橘猫在雪地里奔跑，夕阳逆光，电影质感"
+            />
 
-      <!-- 任务进度卡片 -->
-      <section v-if="task" class="panel card mt-16">
-        <div class="card-head">
-          <span class="card-title">本次生成进度</span>
-          <span class="muted mono">{{ task.task_no }}</span>
-        </div>
+            <div class="draft-hint muted">
+              <span class="draft-dot" />本地草稿自动保存，刷新或断线后可继续编辑
+              <button type="button" class="reselect" @click="clearDraftNow">清空草稿</button>
+            </div>
 
-        <div v-if="task.task_status === 'queued'" class="state">
-          <div class="state-title">排队中</div>
-          <div class="muted">前面还有 {{ task.queue_ahead ?? 0 }} 人，预计等待约 {{ formatSeconds(task.estimated_wait_sec) }}</div>
-          <el-progress :percentage="35" :show-text="false" status="warning" :stroke-width="8" class="mt-8" />
-        </div>
-
-        <div v-else-if="task.task_status === 'running'" class="state">
-          <div class="state-title">模型正在生成视频中…</div>
-          <div class="muted">通常需要 1~3 分钟，请保持页面打开</div>
-          <el-progress :percentage="70" :show-text="false" :indeterminate="true" :duration="2" :stroke-width="8" class="mt-8" />
-        </div>
-
-        <div v-else-if="task.task_status === 'succeeded'" class="state">
-          <div class="state-title text-success">出片成功，可在线预览与下载</div>
-          <video v-if="task.video_url" :src="task.video_url" controls class="video" preload="metadata" />
-          <div class="mt-12 flex gap-8">
-            <el-button type="primary" @click="downloadTask">下载 MP4</el-button>
-            <el-button @click="goMyWorks">查看我的作品</el-button>
+            <div class="examples" v-if="examples.length">
+              <span class="muted">快捷示例</span>
+              <button
+                v-for="(example, index) in examples"
+                :key="index"
+                type="button"
+                class="example-chip"
+                :title="example"
+                @click="applyExample(example)"
+              >{{ example }}</button>
+            </div>
           </div>
         </div>
 
-        <div v-else-if="task.task_status === 'failed'" class="state">
-          <div class="state-title text-danger">生成失败</div>
+        <el-alert v-if="restoredNotice" type="info" :closable="true" show-icon class="notice" @close="restoredNotice = false">
+          <template #title>已恢复上次未提交草稿（{{ restoredAt }}）</template>
+        </el-alert>
+
+        <el-alert v-if="!auth.inWindow" type="warning" :closable="false" show-icon class="notice" :title="windowBlockedText" />
+        <el-alert v-else-if="remaining <= 0" type="error" :closable="false" show-icon class="notice" title="生成次数已用完，无法继续提交" />
+
+        <div class="submit-row">
+          <span class="muted">提交将消耗 1 次创作机会，失败自动退还</span>
+          <el-button
+            type="primary"
+            size="large"
+            class="submit-btn"
+            :loading="submitting"
+            :disabled="!canSubmit"
+            @click="submit"
+          >{{ submitting ? '提交中…' : '立即提交生成' }}</el-button>
+        </div>
+      </section>
+
+      <!-- ================= 成片渲染与展映区 ================= -->
+      <section v-if="task" class="screen panel">
+        <div class="screen-head">
+          <span class="screen-title">成片渲染与展映</span>
+          <span class="muted mono">{{ task.task_no }}</span>
+        </div>
+
+        <!-- 排队 / 生成中：深蓝科技状态条 -->
+        <div v-if="task.task_status === 'queued' || task.task_status === 'running'" class="render-state">
+          <div class="render-bar">
+            <span class="render-pulse" />
+            <b>{{ task.task_status === 'queued' ? '任务排队中' : '模型正在渲染视频' }}</b>
+            <span class="render-sub">
+              <template v-if="task.task_status === 'queued'">前面还有 {{ task.queue_ahead ?? 0 }} 人 · 预计等待 {{ formatSeconds(task.estimated_wait_sec) }}</template>
+              <template v-else>通常需要 1~3 分钟，请保持页面打开（每 3 秒自动刷新进度）</template>
+            </span>
+          </div>
+          <el-progress :percentage="task.task_status === 'queued' ? 35 : 70" :show-text="false" :stroke-width="6" />
+        </div>
+
+        <!-- 成功：影院黑底播放器 -->
+        <div v-else-if="task.task_status === 'succeeded'" class="screen-ok">
+          <div class="cinema">
+            <video v-if="task.video_url" :src="task.video_url" controls class="video" preload="metadata" />
+          </div>
+          <div class="spec-bar">
+            <span>MP4 · H.264 / AAC</span>
+            <span>15 秒</span>
+            <span>{{ task.engine_code || 'wq-v1' }}</span>
+            <span>{{ task.aspect_ratio || '16:9' }}</span>
+          </div>
+          <div class="screen-actions">
+            <el-button type="primary" @click="downloadTask">下载 MP4</el-button>
+            <el-button @click="goMyWorks">前往作品库</el-button>
+          </div>
+        </div>
+
+        <!-- 失败 -->
+        <div v-else-if="task.task_status === 'failed'" class="render-fail">
+          <div class="fail-title">生成失败</div>
           <div class="text-danger">{{ task.error_msg || '未知错误' }}</div>
           <div class="muted mt-8">本次消耗的 1 次机会已自动退还，可重新提交。</div>
         </div>
 
-        <div v-else class="state">
-          <div class="state-title">草稿已创建</div>
-          <div class="muted">等待提交生成</div>
+        <div v-else class="render-state">
+          <div class="render-bar"><b>草稿已创建</b><span class="render-sub">等待提交生成</span></div>
         </div>
       </section>
     </div>
@@ -183,11 +218,9 @@ const router = useRouter()
 const question = computed<QuestionPublic | null>(() => auth.questions[0] ?? null)
 const remaining = computed(() => question.value?.remaining ?? 0)
 const total = computed(() => question.value?.quota_total ?? 0)
+const examples = computed<string[]>(() => (question.value?.prompt_examples ?? []).slice(0, 3))
 
-/**
- * 画幅自适应首帧：按上传图片的实际宽高比，就近匹配后端允许的 5 种画幅。
- * 用 log 距离比较，横图/竖图两个方向对称，不会把 3:2 判成 9:16。
- */
+/** 画幅自适应首帧：按上传图片宽高比，就近匹配后端允许的 5 种画幅（log 距离，横竖对称） */
 const ALLOWED_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16'] as const
 
 const detectedRatio = computed<string>(() => {
@@ -209,14 +242,12 @@ const detectedRatio = computed<string>(() => {
 
 const ratioHint = computed(() => {
   const img = image.value
-  if (!img) return '按首帧图片比例自动决定，无需手动选择'
+  if (!img) return '上传首帧后自动匹配画幅比例'
   const [w, h] = detectedRatio.value.split(':').map(Number)
   const actual = img.width / img.height
   const deviation = Math.abs(actual - w / h) / actual
   if (deviation < 0.02) return `与首帧 ${img.width}×${img.height} 一致`
-  if (deviation > 0.15) {
-    return `首帧 ${img.width}×${img.height} 与 ${detectedRatio.value} 相差 ${Math.round(deviation * 100)}%，成片会按 ${detectedRatio.value} 裁切或补边`
-  }
+  if (deviation > 0.15) return `首帧 ${img.width}×${img.height} 与 ${detectedRatio.value} 相差 ${Math.round(deviation * 100)}%，成片会按 ${detectedRatio.value} 裁切或补边`
   return `首帧 ${img.width}×${img.height}，就近匹配 ${detectedRatio.value}`
 })
 
@@ -248,9 +279,7 @@ const canSubmit = computed(() => {
 })
 
 onMounted(async () => {
-  if (!auth.questions.length) {
-    await auth.refreshAll()
-  }
+  if (!auth.questions.length) await auth.refreshAll()
   restoreDraft()
   await resumeInflight()
 })
@@ -302,9 +331,7 @@ function persistDraft(): void {
     imageHeight: image.value?.height ?? null,
     savedAt: Date.now(),
   })
-  if (result === 'text-only') {
-    ElMessage.warning('本地存储空间不足，已仅保存提示词（图片未暂存）')
-  }
+  if (result === 'text-only') ElMessage.warning('本地存储空间不足，已仅保存提示词（图片未暂存）')
 }
 
 watch([prompt, image], () => {
@@ -321,6 +348,9 @@ function clearDraftNow(): void {
   ElMessage.success('已清空草稿')
 }
 
+function applyExample(example: string): void {
+  prompt.value = example.slice(0, 300)
+}
 
 function pickFile(): void {
   fileInput.value?.click()
@@ -355,9 +385,7 @@ async function handleFile(file: File): Promise<void> {
       compressed: result.compressed,
     }
     if (result.compressed) {
-      ElMessage.success(
-        `已压缩：${result.originalWidth}×${result.originalHeight} → ${result.width}×${result.height}（${formatSize(result.size)}）`,
-      )
+      ElMessage.success(`已压缩：${result.originalWidth}×${result.originalHeight} → ${result.width}×${result.height}（${formatSize(result.size)}）`)
     } else {
       ElMessage.info(`图片长边 ${result.originalWidth}px，未超过 1920px，保持原图上传`)
     }
@@ -467,102 +495,218 @@ async function goMyWorks(): Promise<void> {
 
 <style scoped>
 .workspace {
-  padding: 24px 20px 48px;
+  position: relative;
+  min-height: 100%;
+  padding: 42px 20px 64px;
+  overflow: hidden;
+}
+
+/* ---- X 型斜切几何背景 + 超大淡水印 ---- */
+.geo-bg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.geo-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.85;
+}
+
+.watermark {
+  position: absolute;
+  top: 180px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 108px;
+  font-weight: 800;
+  letter-spacing: 12px;
+  white-space: nowrap;
+  color: rgba(6, 43, 86, 0.04);
+  line-height: 1;
 }
 
 .shell {
-  max-width: 1000px;
+  position: relative;
+  z-index: 1;
+  max-width: 1040px;
   margin: 0 auto;
 }
 
-.hero {
+/* ---- 居中主标题组 ---- */
+.stage-title {
+  text-align: center;
+  margin-bottom: 26px;
+}
+
+.eyebrow {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 20px 24px;
-  margin-bottom: 16px;
-  background: linear-gradient(135deg, #eff6ff 0%, #ffffff 60%);
-}
-
-.hero-title {
-  font-size: 22px;
-  margin: 0 0 8px;
+  justify-content: center;
+  gap: 10px;
+  color: var(--i2v-primary);
+  font-size: 11px;
   font-weight: 700;
+  letter-spacing: 3px;
+  margin-bottom: 12px;
 }
 
-.hero-desc {
+.eyebrow-line {
+  width: 28px;
+  height: 1px;
+  background: var(--i2v-primary);
+  opacity: 0.5;
+}
+
+.stage-h2 {
+  margin: 0;
+  color: var(--i2v-navy);
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 3px;
+}
+
+.title-rule {
+  display: flex;
+  justify-content: center;
+  margin: 14px 0 12px;
+}
+
+.title-rule span {
+  width: 54px;
+  height: 3px;
+  background: linear-gradient(90deg, var(--i2v-primary), var(--i2v-amber));
+  border-radius: 2px;
+}
+
+.stage-sub {
   margin: 0;
   color: var(--i2v-text-sub);
-  line-height: 1.6;
   font-size: 13px;
+  letter-spacing: 0.5px;
 }
 
-.hero-side {
-  text-align: right;
-  flex: 0 0 auto;
+/* ---- 双步骤主工作舱 ---- */
+.studio {
+  position: relative;
+  overflow: hidden;
+  padding: 0 24px 24px;
 }
 
-.quota-tag {
+.studio-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--i2v-primary) 0%, var(--i2v-cyan) 55%, var(--i2v-amber) 100%);
+}
+
+.studio-intro {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 0 16px;
+  border-bottom: 1px solid var(--i2v-border);
+  margin-bottom: 20px;
+}
+
+.intro-badge {
+  padding: 3px 10px;
+  background: var(--i2v-navy);
+  color: #fff;
+  font-size: 11px;
   font-weight: 700;
+  letter-spacing: 1px;
+  border-radius: 3px;
+}
+
+.quota-pill {
+  margin-left: auto;
+  padding: 5px 12px;
+  background: var(--i2v-cyan-soft);
+  color: var(--i2v-navy);
+  font-size: 12px;
+  border-radius: 3px;
   font-variant-numeric: tabular-nums;
 }
 
-.card {
-  padding: 20px 24px 24px;
+.quota-pill b {
+  color: var(--i2v-primary);
+  font-size: 16px;
 }
 
-.card-head {
+.studio-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.step {
+  min-width: 0;
+}
+
+.step-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 14px;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
-.card-title {
+.step-num {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--i2v-primary);
+  line-height: 1.1;
+  letter-spacing: -1px;
+}
+
+.step-title {
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 700;
+  color: var(--i2v-navy);
 }
 
-.block-label {
-  font-size: 12px;
-  color: var(--i2v-text-sub);
-  margin-bottom: 8px;
-}
-
+/* 上传舱 */
 .dropzone {
-  border: 2px dashed var(--i2v-border);
-  border-radius: 10px;
-  min-height: 180px;
+  border: 1.5px dashed #b9c9d8;
+  border-radius: var(--i2v-radius);
+  min-height: 214px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 16px;
+  gap: 8px;
+  padding: 14px;
   cursor: pointer;
-  background: #fcfcfd;
-  transition: all 0.15s;
+  background: #fbfcfd;
+  transition: border-color 0.15s, background 0.15s;
 }
 
 .dropzone.dragging,
 .dropzone:hover {
   border-color: var(--i2v-primary);
-  background: #f5f9ff;
+  background: var(--i2v-cyan-soft);
+}
+
+.upload-icon {
+  margin-bottom: 2px;
 }
 
 .preview {
   max-width: 100%;
-  max-height: 220px;
-  border-radius: 8px;
+  max-height: 176px;
+  border-radius: var(--i2v-radius);
   object-fit: contain;
 }
 
+.preview-meta,
 .drop-hint {
-  font-size: 14px;
-}
-
-.preview-meta {
   font-size: 12px;
 }
 
@@ -570,35 +714,243 @@ async function goMyWorks(): Promise<void> {
   display: none;
 }
 
-
-.ratio-row {
+.asset-meta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
 }
 
-.submit {
-  width: 100%;
+.ratio-label {
+  font-size: 12px;
+  padding: 3px 9px;
+  background: var(--i2v-navy);
+  color: #fff;
+  border-radius: 3px;
+}
+
+.ratio-label b {
+  color: var(--i2v-cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+.ratio-hint {
+  flex: 1;
+  min-width: 120px;
+}
+
+.reselect {
+  border: none;
+  background: none;
+  color: var(--i2v-primary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 0;
+  white-space: nowrap;
+}
+
+.reselect:hover {
+  color: var(--i2v-primary-hover);
+  text-decoration: underline;
+}
+
+/* 提示词区 */
+.draft-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.draft-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--i2v-success);
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.draft-hint .reselect {
+  margin-left: auto;
+}
+
+.examples {
+  margin-top: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.examples > .muted {
+  padding-top: 5px;
+}
+
+.example-chip {
+  border: 1px solid #bfe3e9;
+  background: var(--i2v-cyan-soft);
+  color: #0b6072;
+  border-radius: var(--i2v-radius);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.example-chip:hover {
+  border-color: var(--i2v-primary);
+  color: #fff;
+  background: var(--i2v-primary);
+}
+
+.notice {
+  margin-top: 16px;
+  border-radius: var(--i2v-radius);
+}
+
+.submit-row {
   margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--i2v-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.submit-btn {
+  min-width: 208px;
   height: 46px;
   font-size: 15px;
+  letter-spacing: 2px;
 }
 
-.restore-alert {
+/* ---- 成片渲染与展映区 ---- */
+.screen {
+  margin-top: 20px;
+  padding: 18px 24px 22px;
+}
+
+.screen-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--i2v-border);
   margin-bottom: 16px;
 }
 
-.state-title {
+.screen-title {
   font-size: 15px;
-  font-weight: 600;
-  margin-bottom: 6px;
+  font-weight: 700;
+  color: var(--i2v-navy);
+}
+
+.render-state {
+  background: linear-gradient(100deg, var(--i2v-navy) 0%, var(--i2v-navy-2) 100%);
+  color: #fff;
+  padding: 16px 20px;
+  border-radius: var(--i2v-radius);
+}
+
+.render-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.render-bar b {
+  letter-spacing: 1px;
+}
+
+.render-sub {
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.render-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--i2v-cyan);
+  box-shadow: 0 0 0 4px rgba(34, 184, 207, 0.2);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    box-shadow: 0 0 0 8px rgba(34, 184, 207, 0.05);
+  }
+}
+
+.cinema {
+  background: #050a12;
+  border: 1px solid var(--i2v-border);
+  border-radius: var(--i2v-radius);
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .video {
   width: 100%;
-  max-height: 460px;
-  border-radius: 8px;
+  height: 100%;
+  max-height: 100%;
+  object-fit: contain;
   background: #000;
-  margin-top: 10px;
+}
+
+.spec-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.spec-bar span {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--i2v-text-sub);
+  background: var(--i2v-bg);
+  border: 1px solid var(--i2v-border);
+  border-radius: 3px;
+}
+
+.screen-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.fail-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--i2v-danger);
+  margin-bottom: 6px;
+}
+
+@media (max-width: 900px) {
+  .studio-grid {
+    grid-template-columns: 1fr;
+  }
+  .watermark {
+    font-size: 64px;
+  }
+  .submit-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .submit-btn {
+    width: 100%;
+  }
 }
 </style>

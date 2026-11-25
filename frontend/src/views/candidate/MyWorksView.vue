@@ -1,29 +1,32 @@
 <template>
-  <div class="my-works page">
-    <div class="head panel">
-      <div class="head-left">
-        <div class="title">我的作品</div>
-        <div class="muted">
-          共 {{ works?.total ?? 0 }} 条作品，其中可下载 {{ downloadableCount }} 条
+  <div class="my-works">
+    <div class="shell">
+      <!-- 居中主标题组 -->
+      <header class="stage-title">
+        <div class="eyebrow"><span class="eyebrow-line" />MY GALLERY · 作品展馆<span class="eyebrow-line" /></div>
+        <h2 class="stage-h2">我的作品库</h2>
+        <div class="title-rule"><span /></div>
+        <p class="stage-sub">共 {{ works?.total ?? 0 }} 条作品，其中可下载 {{ downloadableCount }} 条</p>
+      </header>
+
+      <div class="toolbar panel">
+        <div class="toolbar-left">
+          <span class="gallery-badge">展馆</span>
+          <span class="muted">全部生成作品按时间归档，支持在线预览与安全下载</span>
+        </div>
+        <div class="toolbar-right">
+          <el-button :loading="loading" @click="reload">刷新</el-button>
+          <el-button type="primary" :loading="zipping" :disabled="downloadableCount === 0" @click="downloadAll">
+            一键打包下载全部作品 (.zip)
+          </el-button>
         </div>
       </div>
-      <div class="head-right">
-        <el-button :loading="loading" @click="reload">刷新</el-button>
-        <el-button type="primary" :loading="zipping" :disabled="downloadableCount === 0" @click="downloadAll">
-          一键打包下载全部作品 (.zip)
-        </el-button>
-      </div>
-    </div>
 
-    <el-empty v-if="!loading && (works?.total ?? 0) === 0" description="还没有作品，去创作工作台提交一条吧" />
+      <el-empty v-if="!loading && (works?.total ?? 0) === 0" description="还没有作品，去创作工作台提交一条吧" />
 
-    <div v-for="group in displayGroups" :key="group.question_id" class="panel group mt-16">
-      <div class="panel-title flex" style="align-items: center; justify-content: space-between">
-        <span>{{ singleMode ? '全部作品' : `${group.question_code} · ${group.question_title}` }}</span>
-        <span class="muted">{{ group.total }} 条</span>
-      </div>
-      <div class="cards">
+      <div v-for="group in displayGroups" :key="group.question_id" class="gallery">
         <div v-for="item in group.works" :key="item.id" class="card">
+          <div class="card-ribbon" />
           <div class="card-head">
             <span class="mono task-no">{{ item.task_no }}</span>
             <el-tag size="small" :type="statusType(item.task_status)">{{ item.status_text }}</el-tag>
@@ -36,38 +39,29 @@
             <span v-if="item.file_size">· {{ formatSize(item.file_size) }}</span>
           </div>
           <div v-if="item.task_status === 'failed'" class="text-danger err">
-            {{ item.error_msg || '生成失败' }}
-            <span class="muted">（本次机会已退还）</span>
+            {{ item.error_msg || '生成失败' }}<span class="muted">（本次机会已退还）</span>
           </div>
           <div class="actions">
-            <el-button
-              size="small"
-              :disabled="!item.preview_url"
-              @click="openPreview(item)"
-            >
-              在线预览
-            </el-button>
+            <el-button size="small" :disabled="!item.preview_url" @click="openPreview(item)">在线预览</el-button>
             <el-button
               size="small"
               type="primary"
               :disabled="!item.download_ready"
               :loading="downloadingId === item.id"
               @click="downloadOne(item)"
-            >
-              下载 MP4
-            </el-button>
+            >下载 MP4</el-button>
           </div>
         </div>
       </div>
-    </div>
 
-    <el-dialog v-model="previewVisible" :title="previewTitle" width="720px" destroy-on-close>
-      <video v-if="previewUrl" :src="previewUrl" controls autoplay class="dialog-video" />
-      <template #footer>
-        <el-button @click="previewVisible = false">关闭</el-button>
-        <el-button v-if="previewItem" type="primary" @click="downloadOne(previewItem)">下载 MP4</el-button>
-      </template>
-    </el-dialog>
+      <el-dialog v-model="previewVisible" :title="previewTitle" width="720px" destroy-on-close>
+        <video v-if="previewUrl" :src="previewUrl" controls autoplay class="dialog-video" />
+        <template #footer>
+          <el-button @click="previewVisible = false">关闭</el-button>
+          <el-button v-if="previewItem" type="primary" @click="downloadOne(previewItem)">下载 MP4</el-button>
+        </template>
+      </el-dialog>
+    </div>
   </div>
 </template>
 
@@ -186,42 +180,129 @@ async function downloadAll(): Promise<void> {
 
 <style scoped>
 .my-works {
-  max-width: 1400px;
+  min-height: 100%;
+  padding: 42px 20px 64px;
+}
+
+.shell {
+  max-width: 1040px;
   margin: 0 auto;
 }
 
-.head {
+.stage-title {
+  text-align: center;
+  margin-bottom: 26px;
+}
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--i2v-primary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  margin-bottom: 12px;
+}
+
+.eyebrow-line {
+  width: 28px;
+  height: 1px;
+  background: var(--i2v-primary);
+  opacity: 0.5;
+}
+
+.stage-h2 {
+  margin: 0;
+  color: var(--i2v-navy);
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 3px;
+}
+
+.title-rule {
+  display: flex;
+  justify-content: center;
+  margin: 14px 0 12px;
+}
+
+.title-rule span {
+  width: 54px;
+  height: 3px;
+  background: linear-gradient(90deg, var(--i2v-primary), var(--i2v-amber));
+  border-radius: 2px;
+}
+
+.stage-sub {
+  margin: 0;
+  color: var(--i2v-text-sub);
+  font-size: 13px;
+}
+
+.toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  gap: 14px;
+  padding: 14px 18px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
 }
 
-.title {
-  font-size: 17px;
-  font-weight: 600;
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
-.head-right {
+.gallery-badge {
+  padding: 3px 10px;
+  background: var(--i2v-navy);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  border-radius: 3px;
+}
+
+.toolbar-right {
   display: flex;
   gap: 10px;
 }
 
-.cards {
+.gallery {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 12px;
-  padding: 14px 16px 18px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
 }
 
 .card {
+  position: relative;
+  overflow: hidden;
   border: 1px solid var(--i2v-border);
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: var(--i2v-radius-lg);
+  padding: 16px 16px 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  background: #fcfcfd;
+  gap: 10px;
+  background: #fff;
+  box-shadow: var(--i2v-shadow);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--i2v-shadow-lg);
+}
+
+.card-ribbon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--i2v-primary), var(--i2v-cyan) 70%, var(--i2v-amber));
 }
 
 .card-head {
@@ -229,6 +310,7 @@ async function downloadAll(): Promise<void> {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  padding-top: 2px;
 }
 
 .task-no {
@@ -238,7 +320,9 @@ async function downloadAll(): Promise<void> {
 
 .prompt {
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.6;
+  color: var(--i2v-text);
+  min-height: 42px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -259,13 +343,15 @@ async function downloadAll(): Promise<void> {
 .actions {
   display: flex;
   gap: 8px;
-  margin-top: 4px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--i2v-border);
 }
 
 .dialog-video {
   width: 100%;
   max-height: 460px;
   background: #000;
-  border-radius: 8px;
+  border-radius: var(--i2v-radius);
 }
 </style>

@@ -1,14 +1,70 @@
-/* 全局样式：考试级简洁风格（低饱和、强对比、无花哨动画） */
+/* ==========================================================================
+   全局视觉基座 —— 第48届世赛中文官网视觉语言（原创复刻，不含任何官方素材）
+   深海皇家蓝 / 孔雀科技青 / 琥珀赛事黄 / 纯白·浅冷灰分段画布
+   全部为 CSS / 内联 SVG 绘制，无任何外链字体或图片，满足内网离线自包含。
+   ========================================================================== */
+
 :root {
-  --i2v-bg: #f5f7fa;
+  /* 深海皇家蓝（顶栏 / Hero / 页脚） */
+  --i2v-navy: #062b56;
+  --i2v-navy-2: #0a3d73;
+  --i2v-navy-deep: #041f40;
+  --i2v-navy-cube: #08335e;
+  --i2v-blue: #0077b6;
+  --i2v-blue-radial: #0c4782;
+
+  /* 孔雀科技青（主按钮 / 激活态 / 标题强调） */
+  --i2v-primary: #0085a1;
+  --i2v-primary-hover: #006d85;
+  --i2v-cyan: #22b8cf;
+  --i2v-cyan-soft: #e3f5f8;
+  --i2v-teal: #1ca7b8;
+
+  /* 琥珀赛事黄（仅魔方高光面与徽章点缀，面积 ≤5%） */
+  --i2v-amber: #f5a623;
+  --i2v-amber-light: #f8b62d;
+
+  /* 画布层次 */
+  --i2v-bg: #eef1f5;
   --i2v-panel: #ffffff;
-  --i2v-border: #e4e7ed;
-  --i2v-text: #1f2d3d;
-  --i2v-text-sub: #606266;
-  --i2v-primary: #2563eb;
-  --i2v-success: #16a34a;
-  --i2v-warning: #d97706;
-  --i2v-danger: #dc2626;
+  --i2v-bg-alt: #e5e9f0;
+  --i2v-geo: #eaecef;
+  --i2v-border: #dce3ea;
+
+  /* 文本 */
+  --i2v-text: #142c47;
+  --i2v-text-sub: #5b6b7f;
+  --i2v-text-invert: #ffffff;
+
+  /* 语义色（克制，不刺眼） */
+  --i2v-success: #1a8f6a;
+  --i2v-warning: #b57a12;
+  --i2v-danger: #c0392b;
+
+  /* 硬朗棱角 */
+  --i2v-radius: 4px;
+  --i2v-radius-lg: 6px;
+  --i2v-shadow: 0 8px 24px rgba(6, 43, 86, 0.07);
+  --i2v-shadow-lg: 0 16px 40px rgba(6, 43, 86, 0.13);
+
+  /* Element Plus 主题变量覆盖：让全部内置组件自动换装孔雀青 */
+  --el-color-primary: #0085a1;
+  --el-color-primary-light-3: #4da6b9;
+  --el-color-primary-light-5: #80c2cf;
+  --el-color-primary-light-7: #b3dbe3;
+  --el-color-primary-light-8: #cce8ed;
+  --el-color-primary-light-9: #e3f5f8;
+  --el-color-primary-dark-2: #006d85;
+  --el-color-success: #1a8f6a;
+  --el-color-warning: #b57a12;
+  --el-color-danger: #c0392b;
+  --el-border-radius-base: 4px;
+  --el-border-radius-small: 4px;
+  --el-border-color: #dce3ea;
+  --el-border-color-light: #e5e9f0;
+  --el-text-color-primary: #142c47;
+  --el-text-color-regular: #3d5268;
+  --el-font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
 }
 
 * {
@@ -23,10 +79,11 @@ body,
 }
 
 body {
-  font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
   background: var(--i2v-bg);
   color: var(--i2v-text);
   font-size: 14px;
+  -webkit-font-smoothing: antialiased;
 }
 
 a {
@@ -41,7 +98,8 @@ a {
 .panel {
   background: var(--i2v-panel);
   border: 1px solid var(--i2v-border);
-  border-radius: 8px;
+  border-radius: var(--i2v-radius-lg);
+  box-shadow: var(--i2v-shadow);
 }
 
 .panel-title {
@@ -57,7 +115,7 @@ a {
 }
 
 .mono {
-  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
 }
 
 .flex {
@@ -88,6 +146,10 @@ a {
   margin-top: 16px;
 }
 
+.ml-8 {
+  margin-left: 8px;
+}
+
 .text-danger {
   color: var(--i2v-danger);
 }
@@ -98,4 +160,38 @@ a {
 
 .text-warning {
   color: var(--i2v-warning);
+}
+
+/* 统一主行动按钮：孔雀青实心 + 4px 微圆角 + 纯白加粗文字 */
+.el-button--primary {
+  --el-button-bg-color: var(--i2v-primary);
+  --el-button-border-color: var(--i2v-primary);
+  --el-button-hover-bg-color: var(--i2v-primary-hover);
+  --el-button-hover-border-color: var(--i2v-primary-hover);
+  --el-button-active-bg-color: var(--i2v-primary-hover);
+  --el-button-active-border-color: var(--i2v-primary-hover);
+  --el-button-text-color: #ffffff;
+  --el-button-hover-text-color: #ffffff;
+  font-weight: 700;
+}
+
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  border-radius: var(--i2v-radius) !important;
+  box-shadow: 0 0 0 1px var(--i2v-border) inset !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-textarea__inner:focus,
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--i2v-primary) inset !important;
+}
+
+.el-dialog {
+  border-radius: var(--i2v-radius-lg) !important;
+}
+
+.el-tag {
+  border-radius: var(--i2v-radius) !important;
 }
