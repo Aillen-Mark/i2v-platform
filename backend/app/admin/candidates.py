@@ -568,6 +568,7 @@ async def create_candidate(
     else:
         account = _format_account(await _next_auto_seq(session, set()))
 
+    # 密码零例外：所有初始/重置密码唯一出口，禁止任何自定义弱密码旁路
     password = generate_exam_password()
     password_hash, init_password_enc = (await _hash_and_encrypt([password]))[0]
     now = utcnow()

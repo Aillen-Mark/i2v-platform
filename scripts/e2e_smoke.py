@@ -74,7 +74,21 @@ async def main() -> int:
             fail("新增考生", created.text)
             return 1
         password = created.json()["password"]
-        ok("POST /admin/candidates", f"{account} / 初始密码 {password}")
+        # 初始密码合规校验：剔除易混字符 O/0/I/l/1，且必含大写、小写、数字
+        ambiguous = set("O0Il1")
+        violations = []
+        if any(ch in ambiguous for ch in password):
+            violations.append("含禁用字符 O/0/I/l/1")
+        if not any(ch.isupper() for ch in password):
+            violations.append("缺大写字母")
+        if not any(ch.islower() for ch in password):
+            violations.append("缺小写字母")
+        if not any(ch.isdigit() for ch in password):
+            violations.append("缺数字")
+        if violations:
+            fail("初始密码合规", f"{password} -> {'、'.join(violations)}")
+            return 1
+        ok("POST /admin/candidates", f"{account} / 初始密码 {password}（合规：无易混字符·含大小写+数字）")
 
         # 4) 单题极简模式：复用库里唯一启用题目，不再新建（没有启用题时才兜底创建）
         questions_admin = (await client.get("/admin/questions")).json()

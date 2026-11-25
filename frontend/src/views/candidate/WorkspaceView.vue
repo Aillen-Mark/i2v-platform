@@ -99,18 +99,6 @@
               <span class="draft-dot" />本地草稿自动保存，刷新或断线后可继续编辑
               <button type="button" class="reselect" @click="clearDraftNow">清空草稿</button>
             </div>
-
-            <div class="examples" v-if="examples.length">
-              <span class="muted">快捷示例</span>
-              <button
-                v-for="(example, index) in examples"
-                :key="index"
-                type="button"
-                class="example-chip"
-                :title="example"
-                @click="applyExample(example)"
-              >{{ example }}</button>
-            </div>
           </div>
         </div>
 
@@ -218,7 +206,6 @@ const router = useRouter()
 const question = computed<QuestionPublic | null>(() => auth.questions[0] ?? null)
 const remaining = computed(() => question.value?.remaining ?? 0)
 const total = computed(() => question.value?.quota_total ?? 0)
-const examples = computed<string[]>(() => (question.value?.prompt_examples ?? []).slice(0, 3))
 
 /** 画幅自适应首帧：按上传图片宽高比，就近匹配后端允许的 5 种画幅（log 距离，横竖对称） */
 const ALLOWED_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16'] as const
@@ -348,9 +335,6 @@ function clearDraftNow(): void {
   ElMessage.success('已清空草稿')
 }
 
-function applyExample(example: string): void {
-  prompt.value = example.slice(0, 300)
-}
 
 function pickFile(): void {
   fileInput.value?.click()
@@ -775,38 +759,6 @@ async function goMyWorks(): Promise<void> {
   margin-left: auto;
 }
 
-.examples {
-  margin-top: 12px;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.examples > .muted {
-  padding-top: 5px;
-}
-
-.example-chip {
-  border: 1px solid #bfe3e9;
-  background: var(--i2v-cyan-soft);
-  color: #0b6072;
-  border-radius: var(--i2v-radius);
-  padding: 4px 10px;
-  font-size: 12px;
-  cursor: pointer;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: left;
-}
-
-.example-chip:hover {
-  border-color: var(--i2v-primary);
-  color: #fff;
-  background: var(--i2v-primary);
-}
 
 .notice {
   margin-top: 16px;

@@ -182,6 +182,35 @@ async def test_generated_password_rules():
         assert not (set(password) & AMBIGUOUS)
 
 
+async def test_create_candidate_password_is_compliant(admin_client):
+    """单条新增考生返回的初始密码必须严格合规（8位、大小写+数字、剔除 O/0/I/l/1）。
+
+    同时确认 schema 已移除自定义密码旁路：即使请求体里塞入弱密码，服务端也只走
+    generate_exam_password()，不会采用调用方传入的值。
+    """
+    for i in range(5):
+        body = await _create_candidate(admin_client, f"单条建号{i:02d}", None)
+        password = body["password"]
+        assert len(password) == 8, f"单条新增密码长度错误：{password}"
+        assert any(c.isupper() for c in password), f"缺大写：{password}"
+        assert any(c.islower() for c in password), f"缺小写：{password}"
+        assert any(c.isdigit() for c in password), f"缺数字：{password}"
+        assert not (set(password) & AMBIGUOUS), f"含易混字符：{password}"
+
+    weak = await admin_client.post(
+        "/admin/candidates",
+        json={"name": "弱密码旁路测试", "account": "WEAKPWD001", "password": "w1m0od4d"},
+    )
+    assert weak.status_code == 200, weak.text
+    returned = weak.json()["password"]
+    assert returned != "w1m0od4d", "服务端竟采用了请求体里的自定义弱密码"
+    assert len(returned) == 8
+    assert any(c.isupper() for c in returned)
+    assert any(c.islower() for c in returned)
+    assert any(c.isdigit() for c in returned)
+    assert not (set(returned) & AMBIGUOUS)
+
+
 # --------------------------------------------------------------------------- #
 # 5. 登录保护：连续 5 次失败锁定 5 分钟
 # --------------------------------------------------------------------------- #

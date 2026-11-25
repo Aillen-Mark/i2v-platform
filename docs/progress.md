@@ -12,6 +12,7 @@
 | Phase 6 | **M6：管理后台前端 + 测试库隔离 + Nginx 网关 + 100 并发压测** | **已完成（2026-11-23，pytest 38 passed / 压测全绿）** |
 | Phase 6.2 | **M6.2：单题极简模式（屏蔽题目管理 + 考生创作居中 + 画幅自适应首帧）** | **已完成（2026-11-24，38 passed / 8080 端到端冒烟全绿）** |
 | Phase 6.3 | **M6.3：单题居中极简模式 + 世赛中文官网视觉语言复刻（精确视觉版）** | **已完成（2026-11-25，构建零错 / 38 passed / 8080 冒烟全绿）** |
+| Phase 6.3.1 | **M6.3.1 终极封版：移除工作台示例词 + 密码零例外加固** | **已完成（2026-11-25，39 passed / 8080 冒烟全绿）** |
 
 ## 当前状态
 
@@ -101,6 +102,13 @@
 **管理端**：`AdminLayout.vue` 深海蓝渐变侧栏 + 六边形徽标 + 孔雀青激活项；`AdminLoginView.vue` 深蓝网格 + 魔方装饰 + 硬朗白卡。
 
 **验收**：`vue-tsc --noEmit && vite build` 零错误（1722 modules）；经 8080 冒烟 17 步全绿；38 passed；主库单题 `Q1 图生视频创意作品制作`（`Q2` 停用）、`DEMO0001` 次数 2/0、`works=0`；离线自包含核验（无外链字体/图片）；headless Chrome 实拍验证渲染。
+
+### M6.3.1 封版微调
+
+- **工作台**：`WorkspaceView.vue` 删除 `.examples` 快捷示例词胶囊、`examples` computed、`applyExample()` 与相关样式；`02 镜头动态提示词` 区只保留输入框、300 字实时计数与本地草稿自动保存恢复提示。
+- **密码零例外**：核查并锁定 4 个密码产生点（Excel 导入 `candidates.py:295` / 单条新增 `candidates.py:573` / 单人重置 `candidates.py:732` / 批量重置 `candidates.py:770`），全部唯一调用 `generate_exam_password()`；`CandidateCreateIn` 移除自定义 `password` 字段与旁路，请求体里即便塞弱密码也会被忽略。
+- **回归护栏**：`backend/tests/test_d1.py` 新增 `test_create_candidate_password_is_compliant`（5 次单条建号断言 8 位 + 大小写 + 数字 + 无 `O0Il1`，并断言弱密码参数被忽略）；`scripts/e2e_smoke.py` 增加返回初始密码合规断言，输出行标注「合规：无易混字符·含大小写+数字」。
+- **验收**：`vue-tsc --noEmit && vite build` 零错误（`index-Cc36fVCw.js`，dist 无残留旧 bundle）；`pytest` **39 passed**；经 8080 冒烟全绿（`初始密码 am3Bncfa`）；主库 `DEMO0001` 次数 2/0、`works=0`、启用题目 1 道。
 
 ### 核心验收实测（本机）
 
